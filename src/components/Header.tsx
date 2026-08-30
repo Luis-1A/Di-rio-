@@ -1,8 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { UserProfile, SyncQueueItem } from '../types';
 import { syncQueue } from '../lib/syncQueue';
-import { auth } from '../lib/firebase';
-import { signOut } from 'firebase/auth';
+import { logoutUser } from '../lib/authService';
 import {
   BookOpen,
   Activity,
@@ -216,7 +215,7 @@ export const Header: React.FC<HeaderProps> = ({
           </button>
 
           <button
-            onClick={() => signOut(auth)}
+            onClick={() => logoutUser()}
             title="Encerrar sessão"
             className="p-2 rounded-xl bg-stone-900 border border-stone-800 text-stone-400 hover:text-red-400 hover:border-red-900/50 transition-colors"
           >

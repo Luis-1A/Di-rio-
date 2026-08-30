@@ -1,13 +1,18 @@
 import React, { useState } from 'react';
 import {
-  signInWithEmailAndPassword,
-  createUserWithEmailAndPassword,
-  sendPasswordResetEmail,
-  updateProfile,
-} from 'firebase/auth';
-import { auth } from '../lib/firebase';
-import { getOrCreateUserProfile } from '../lib/firestoreService';
-import { BookOpen, Sparkles, KeyRound, Mail, User, ArrowRight, CheckCircle2, AlertCircle } from 'lucide-react';
+  BookOpen,
+  Sparkles,
+  KeyRound,
+  Mail,
+  User,
+  ArrowRight,
+  CheckCircle2,
+  AlertCircle,
+  LogIn,
+  UserPlus,
+  ShieldCheck,
+} from 'lucide-react';
+import { registerUser, loginUser, resetOrChangePassword } from '../lib/authService';
 
 type AuthMode = 'login' | 'register' | 'forgot';
 
@@ -21,120 +26,169 @@ export const AuthScreen: React.FC<AuthScreenProps> = () => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
-
-  const translateFirebaseError = (errCode: string): string => {
-    switch (errCode) {
-      case 'auth/invalid-email':
-        return 'O formato do e-mail é inválido.';
-      case 'auth/user-disabled':
-        return 'Esta conta de usuário foi desativada.';
-      case 'auth/user-not-found':
-        return 'Nenhum usuário encontrado com este e-mail.';
-      case 'auth/wrong-password':
-      case 'auth/invalid-credential':
-        return 'E-mail ou senha incorretos.';
-      case 'auth/email-already-in-use':
-        return 'Este e-mail já está cadastrado em outra conta.';
-      case 'auth/weak-password':
-        return 'A senha é muito fraca. Escolha uma senha com pelo menos 6 caracteres.';
-      case 'auth/network-request-failed':
-        return 'Falha de rede. Verifique sua conexão com a internet.';
-      case 'auth/too-many-requests':
-        return 'Muitas tentativas sem sucesso. Tente novamente mais tarde.';
-      default:
-        return 'Ocorreu um erro ao autenticar. Tente novamente.';
-    }
-  };
+  const [suggestMode, setSuggestMode] = useState<AuthMode | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
     setSuccessMsg(null);
+    setSuggestMode(null);
 
-    if (!email.trim()) {
+    const cleanEmail = email.trim();
+    if (!cleanEmail) {
       setErrorMsg('Informe o seu endereço de e-mail.');
       return;
     }
 
-    if (mode !== 'forgot' && !password) {
-      setErrorMsg('Informe a sua senha.');
-      return;
-    }
-
-    if (mode === 'register') {
+    if (mode === 'login') {
+      if (!password) {
+        setErrorMsg('Digite sua senha para acessar.');
+        return;
+      }
+      setLoading(true);
+      try {
+        await loginUser(cleanEmail, password);
+      } catch (err: any) {
+        console.error('Login error:', err);
+        const msg = err.message || 'Erro ao autenticar.';
+        setErrorMsg(msg);
+        if (msg.includes('Criar conta') || msg.includes('não encontrada')) {
+          setSuggestMode('register');
+        }
+      } finally {
+        setLoading(false);
+      }
+    } else if (mode === 'register') {
       if (!name.trim()) {
-        setErrorMsg('Informe seu nome ou apelido.');
+        setErrorMsg('Informe seu nome ou como prefere ser chamado.');
+        return;
+      }
+      if (!password) {
+        setErrorMsg('Defina uma senha de acesso.');
+        return;
+      }
+      if (password.length < 6) {
+        setErrorMsg('A senha precisa ter pelo menos 6 caracteres.');
         return;
       }
       if (password !== confirmPassword) {
         setErrorMsg('As senhas digitadas não coincidem.');
         return;
       }
-      if (password.length < 6) {
-        setErrorMsg('A senha precisa ter no mínimo 6 caracteres.');
+      setLoading(true);
+      try {
+        await registerUser(cleanEmail, password, name.trim());
+      } catch (err: any) {
+        console.error('Registration error:', err);
+        const msg = err.message || 'Erro ao criar conta.';
+        setErrorMsg(msg);
+        if (msg.includes('já está cadastrado') || msg.includes('Entrar')) {
+          setSuggestMode('login');
+        }
+      } finally {
+        setLoading(false);
+      }
+    } else if (mode === 'forgot') {
+      if (!newPassword || newPassword.length < 6) {
+        setErrorMsg('Informe uma nova senha com pelo menos 6 caracteres.');
         return;
       }
+      setLoading(true);
+      try {
+        const resMsg = await resetOrChangePassword(cleanEmail, newPassword);
+        setSuccessMsg(resMsg);
+        setPassword(newPassword);
+        setTimeout(() => {
+          setMode('login');
+          setSuccessMsg('Senha atualizada com sucesso! Você já pode entrar.');
+        }, 1200);
+      } catch (err: any) {
+        console.error('Password reset error:', err);
+        setErrorMsg(err.message || 'Erro ao redefinir senha.');
+      } finally {
+        setLoading(false);
+      }
+    }
+  };
+
+  const switchTo = (newMode: AuthMode) => {
+    setMode(newMode);
+    setErrorMsg(null);
+    setSuccessMsg(null);
+    setSuggestMode(null);
+    if (newMode === 'register' && password) {
+      setConfirmPassword(password);
+      if (!name && email) {
+        const defaultName = email.split('@')[0].replace(/[._0-9]/g, ' ').trim();
+        setName(defaultName.charAt(0).toUpperCase() + defaultName.slice(1) || 'Meu Diário');
+      }
+    }
+  };
+
+  const handleAutoCreateAccount = async () => {
+    setErrorMsg(null);
+    setSuccessMsg(null);
+    setSuggestMode(null);
+
+    const cleanEmail = email.trim();
+    if (!cleanEmail) {
+      setErrorMsg('Informe o seu endereço de e-mail.');
+      return;
+    }
+    if (!password || password.length < 6) {
+      switchTo('register');
+      setErrorMsg('Defina uma senha com no mínimo 6 caracteres para criar sua conta.');
+      return;
     }
 
+    const defaultName = name.trim() || email.split('@')[0] || 'Usuário';
     setLoading(true);
-
     try {
-      if (mode === 'login') {
-        const userCred = await signInWithEmailAndPassword(auth, email.trim(), password);
-        await getOrCreateUserProfile(userCred.user.uid, userCred.user.email || email, userCred.user.displayName || undefined);
-      } else if (mode === 'register') {
-        const userCred = await createUserWithEmailAndPassword(auth, email.trim(), password);
-        await updateProfile(userCred.user, { displayName: name.trim() });
-        await getOrCreateUserProfile(userCred.user.uid, email.trim(), name.trim());
-      } else if (mode === 'forgot') {
-        await sendPasswordResetEmail(auth, email.trim());
-        setSuccessMsg('E-mail de recuperação enviado com sucesso! Verifique sua caixa de entrada.');
-      }
+      await registerUser(cleanEmail, password, defaultName);
     } catch (err: any) {
-      console.error('Firebase Auth error:', err);
-      const message = translateFirebaseError(err.code || '');
-      setErrorMsg(message);
+      console.error('Auto-registration error:', err);
+      setErrorMsg(err.message || 'Erro ao criar conta.');
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div id="auth-screen-container" className="min-h-screen bg-stone-950 flex flex-col justify-center items-center px-4 py-8 relative overflow-hidden">
+    <div
+      id="auth-screen-container"
+      className="min-h-screen bg-stone-950 flex flex-col justify-center items-center px-4 py-8 relative overflow-hidden"
+    >
       {/* Subtle ambient lighting */}
       <div className="absolute -top-40 -left-40 w-96 h-96 bg-amber-600/10 rounded-full blur-3xl pointer-events-none" />
       <div className="absolute -bottom-40 -right-40 w-96 h-96 bg-stone-800/20 rounded-full blur-3xl pointer-events-none" />
 
       <div className="w-full max-w-md relative z-10">
         {/* Brand Header */}
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-stone-900 border border-stone-800 shadow-xl mb-4 text-amber-400">
-            <BookOpen className="w-8 h-8" />
+        <div className="text-center mb-6">
+          <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-stone-900 border border-stone-800 shadow-xl mb-3 text-amber-400">
+            <BookOpen className="w-7 h-7" />
           </div>
-          <h1 className="text-3xl font-bold font-serif text-stone-100 tracking-tight">
+          <h1 className="text-2xl sm:text-3xl font-bold font-serif text-stone-100 tracking-tight">
             Diário Pessoal
           </h1>
-          <p className="text-stone-400 text-sm mt-2 font-sans">
+          <p className="text-stone-400 text-xs sm:text-sm mt-1.5 font-sans">
             Seu arquivo digital. Sua memória. Sua história.
           </p>
         </div>
 
         {/* Auth Card */}
-        <div className="bg-stone-900/90 backdrop-blur-md border border-stone-800/80 rounded-2xl p-6 sm:p-8 shadow-2xl">
-          {/* Tabs */}
-          <div className="flex border-b border-stone-800 mb-6 pb-2">
+        <div className="bg-stone-900/90 backdrop-blur-md border border-stone-800/80 rounded-2xl p-6 sm:p-8 shadow-2xl space-y-5">
+          {/* Navigation Tabs */}
+          <div className="flex border-b border-stone-800 pb-2">
             <button
               id="auth-tab-login"
               type="button"
-              onClick={() => {
-                setMode('login');
-                setErrorMsg(null);
-                setSuccessMsg(null);
-              }}
-              className={`flex-1 pb-2 text-sm font-medium transition-colors text-center border-b-2 -mb-2 ${
+              onClick={() => switchTo('login')}
+              className={`flex-1 pb-2 text-xs sm:text-sm font-medium transition-colors text-center border-b-2 -mb-2 ${
                 mode === 'login'
                   ? 'border-amber-500 text-amber-400 font-semibold'
                   : 'border-transparent text-stone-400 hover:text-stone-200'
@@ -145,12 +199,8 @@ export const AuthScreen: React.FC<AuthScreenProps> = () => {
             <button
               id="auth-tab-register"
               type="button"
-              onClick={() => {
-                setMode('register');
-                setErrorMsg(null);
-                setSuccessMsg(null);
-              }}
-              className={`flex-1 pb-2 text-sm font-medium transition-colors text-center border-b-2 -mb-2 ${
+              onClick={() => switchTo('register')}
+              className={`flex-1 pb-2 text-xs sm:text-sm font-medium transition-colors text-center border-b-2 -mb-2 ${
                 mode === 'register'
                   ? 'border-amber-500 text-amber-400 font-semibold'
                   : 'border-transparent text-stone-400 hover:text-stone-200'
@@ -161,12 +211,8 @@ export const AuthScreen: React.FC<AuthScreenProps> = () => {
             <button
               id="auth-tab-forgot"
               type="button"
-              onClick={() => {
-                setMode('forgot');
-                setErrorMsg(null);
-                setSuccessMsg(null);
-              }}
-              className={`flex-1 pb-2 text-sm font-medium transition-colors text-center border-b-2 -mb-2 ${
+              onClick={() => switchTo('forgot')}
+              className={`flex-1 pb-2 text-xs sm:text-sm font-medium transition-colors text-center border-b-2 -mb-2 ${
                 mode === 'forgot'
                   ? 'border-amber-500 text-amber-400 font-semibold'
                   : 'border-transparent text-stone-400 hover:text-stone-200'
@@ -178,19 +224,61 @@ export const AuthScreen: React.FC<AuthScreenProps> = () => {
 
           {/* Feedback banners */}
           {errorMsg && (
-            <div id="auth-error-banner" className="mb-5 p-3.5 rounded-xl bg-red-950/60 border border-red-800/60 text-red-200 text-sm flex items-start gap-2.5">
-              <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
-              <span>{errorMsg}</span>
+            <div
+              id="auth-error-banner"
+              className="p-3.5 rounded-xl bg-red-950/70 border border-red-800/80 text-red-200 text-xs sm:text-sm space-y-2.5"
+            >
+              <div className="flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                <span>{errorMsg}</span>
+              </div>
+
+              {suggestMode === 'login' && (
+                <div className="pt-1">
+                  <button
+                    type="button"
+                    onClick={() => switchTo('login')}
+                    className="px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-stone-950 text-xs font-bold rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer shadow-md"
+                  >
+                    <LogIn className="w-3.5 h-3.5" />
+                    <span>Acessar a aba "Entrar"</span>
+                  </button>
+                </div>
+              )}
+
+              {suggestMode === 'register' && (
+                <div className="pt-1 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleAutoCreateAccount}
+                    className="px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-stone-950 text-xs font-bold rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer shadow-md"
+                  >
+                    <UserPlus className="w-3.5 h-3.5" />
+                    <span>Criar conta agora com esta senha</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => switchTo('register')}
+                    className="px-2.5 py-1.5 bg-stone-800 hover:bg-stone-700 text-stone-300 hover:text-stone-100 text-xs font-medium rounded-lg transition-colors cursor-pointer"
+                  >
+                    <span>Ir para aba Criar conta</span>
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
           {successMsg && (
-            <div id="auth-success-banner" className="mb-5 p-3.5 rounded-xl bg-emerald-950/60 border border-emerald-800/60 text-emerald-200 text-sm flex items-start gap-2.5">
+            <div
+              id="auth-success-banner"
+              className="p-3.5 rounded-xl bg-emerald-950/60 border border-emerald-800/60 text-emerald-200 text-xs sm:text-sm flex items-start gap-2.5"
+            >
               <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
               <span>{successMsg}</span>
             </div>
           )}
 
+          {/* Primary Form */}
           <form onSubmit={handleSubmit} className="space-y-4">
             {mode === 'register' && (
               <div>
@@ -198,7 +286,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = () => {
                   Seu Nome
                 </label>
                 <div className="relative">
-                  <User className="w-4 h-4 text-stone-500 absolute left-3.5 top-3.5" />
+                  <User className="w-4 h-4 text-stone-500 absolute left-3.5 top-3" />
                   <input
                     id="input-register-name"
                     type="text"
@@ -217,7 +305,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = () => {
                 E-mail
               </label>
               <div className="relative">
-                <Mail className="w-4 h-4 text-stone-500 absolute left-3.5 top-3.5" />
+                <Mail className="w-4 h-4 text-stone-500 absolute left-3.5 top-3" />
                 <input
                   id="input-auth-email"
                   type="email"
@@ -236,9 +324,18 @@ export const AuthScreen: React.FC<AuthScreenProps> = () => {
                   <label className="text-xs font-semibold uppercase tracking-wider text-stone-400">
                     Senha
                   </label>
+                  {mode === 'login' && (
+                    <button
+                      type="button"
+                      onClick={() => switchTo('forgot')}
+                      className="text-xs text-amber-500/80 hover:text-amber-400 transition-colors"
+                    >
+                      Esqueceu?
+                    </button>
+                  )}
                 </div>
                 <div className="relative">
-                  <KeyRound className="w-4 h-4 text-stone-500 absolute left-3.5 top-3.5" />
+                  <KeyRound className="w-4 h-4 text-stone-500 absolute left-3.5 top-3" />
                   <input
                     id="input-auth-password"
                     type="password"
@@ -258,7 +355,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = () => {
                   Confirmar Senha
                 </label>
                 <div className="relative">
-                  <KeyRound className="w-4 h-4 text-stone-500 absolute left-3.5 top-3.5" />
+                  <KeyRound className="w-4 h-4 text-stone-500 absolute left-3.5 top-3" />
                   <input
                     id="input-register-password-confirm"
                     type="password"
@@ -272,14 +369,34 @@ export const AuthScreen: React.FC<AuthScreenProps> = () => {
               </div>
             )}
 
+            {mode === 'forgot' && (
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-wider text-stone-400 mb-1.5">
+                  Nova Senha Desejada
+                </label>
+                <div className="relative">
+                  <KeyRound className="w-4 h-4 text-stone-500 absolute left-3.5 top-3" />
+                  <input
+                    id="input-forgot-new-password"
+                    type="password"
+                    required
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    placeholder="Mínimo 6 caracteres"
+                    className="w-full bg-stone-950 border border-stone-800 rounded-xl px-10 py-2.5 text-stone-100 placeholder:text-stone-600 focus:outline-none focus:border-amber-500 text-sm transition-all"
+                  />
+                </div>
+              </div>
+            )}
+
             <button
               id="btn-auth-submit"
               type="submit"
               disabled={loading}
-              className="w-full mt-6 bg-amber-600 hover:bg-amber-500 disabled:bg-stone-800 disabled:text-stone-600 text-stone-950 font-semibold py-3 px-4 rounded-xl flex items-center justify-center gap-2 transition-all shadow-lg shadow-amber-900/20 cursor-pointer"
+              className="w-full mt-4 bg-amber-600 hover:bg-amber-500 disabled:bg-stone-800 disabled:text-stone-600 text-stone-950 font-semibold py-2.5 sm:py-3 px-4 rounded-xl flex items-center justify-center gap-2 transition-all shadow-lg shadow-amber-900/20 cursor-pointer text-sm"
             >
               {loading ? (
-                <div className="w-5 h-5 border-2 border-stone-900 border-t-transparent rounded-full animate-spin" />
+                <div className="w-4 h-4 border-2 border-stone-900 border-t-transparent rounded-full animate-spin" />
               ) : (
                 <>
                   <span>
@@ -287,7 +404,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = () => {
                       ? 'Entrar no Diário'
                       : mode === 'register'
                       ? 'Criar Meu Arquivo Pessoal'
-                      : 'Enviar Instruções de Recuperação'}
+                      : 'Redefinir e Salvar Senha'}
                   </span>
                   <ArrowRight className="w-4 h-4" />
                 </>
@@ -295,10 +412,10 @@ export const AuthScreen: React.FC<AuthScreenProps> = () => {
             </button>
           </form>
 
-          {/* Privacy badge */}
-          <div className="mt-6 pt-4 border-t border-stone-800/80 flex items-center justify-center gap-2 text-xs text-stone-500">
-            <Sparkles className="w-3.5 h-3.5 text-amber-500/70" />
-            <span>Isolamento individual criptografado via Firebase</span>
+          {/* Privacy & Security footer */}
+          <div className="pt-3 border-t border-stone-800/80 flex items-center justify-center gap-2 text-xs text-stone-500">
+            <ShieldCheck className="w-3.5 h-3.5 text-amber-500/70" />
+            <span>Acesso seguro com isolamento individual e criptografia</span>
           </div>
         </div>
       </div>

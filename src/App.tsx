@@ -1,6 +1,4 @@
 import React, { useState, useEffect } from 'react';
-import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
-import { auth } from './lib/firebase';
 import {
   UserProfile,
   DiaryRecord,
@@ -9,7 +7,6 @@ import {
   IAUProfileSettings,
 } from './types';
 import {
-  getOrCreateUserProfile,
   getIAUSettings,
   defaultIAUSettings,
   subscribeToRecords,
@@ -17,6 +14,7 @@ import {
   subscribeToMessages,
   flushSyncQueue,
 } from './lib/firestoreService';
+import { subscribeToAuth } from './lib/authService';
 
 import { AuthScreen } from './components/AuthScreen';
 import { Header } from './components/Header';
@@ -48,32 +46,21 @@ export default function App() {
   // Diagnostics Modal
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
 
-  // 1. Firebase Auth state listener
+  // 1. Unified Auth state listener
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (fbUser: FirebaseUser | null) => {
-      if (fbUser) {
+    const unsubscribe = subscribeToAuth(async (user: UserProfile | null) => {
+      if (user) {
         try {
-          const profile = await getOrCreateUserProfile(
-            fbUser.uid,
-            fbUser.email || '',
-            fbUser.displayName || undefined
-          );
-          const settings = await getIAUSettings(fbUser.uid);
-          setCurrentUser(profile);
+          const settings = await getIAUSettings(user.uid);
+          setCurrentUser(user);
           setIauSettings(settings);
           // Try flushing any pending offline sync queue
-          flushSyncQueue(fbUser.uid).catch((err) =>
+          flushSyncQueue(user.uid).catch((err) =>
             console.warn('Queue flush initial attempt:', err)
           );
         } catch (err) {
-          console.error('Error loading user profile after auth:', err);
-          setCurrentUser({
-            uid: fbUser.uid,
-            email: fbUser.email || '',
-            displayName: fbUser.displayName || fbUser.email?.split('@')[0] || 'Usuário',
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-          });
+          console.error('Error loading settings after auth:', err);
+          setCurrentUser(user);
         }
       } else {
         setCurrentUser(null);
