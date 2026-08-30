@@ -10,6 +10,7 @@ import {
   uploadFileToStorage,
 } from '../lib/firestoreService';
 import { AudioProcessor, AudioCaptureResult } from '../lib/audioProcessor';
+import { transcribeAudioWithIAU, organizeRecordWithIAU } from '../lib/geminiBridge';
 import {
   Save,
   CheckCircle2,
@@ -149,24 +150,16 @@ export const RecordEditor: React.FC<RecordEditorProps> = ({
       setAttachments((prev) => [...prev, newAttachment]);
       setType('audio');
 
-      // 2. Request Gemini Transcription in background
-      fetch('/api/gemini/transcribe', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          base64Audio: result.base64,
-          mimeType: result.mimeType,
-        }),
-      })
-        .then((res) => res.json())
-        .then((data) => {
-          if (data.transcript) {
+      // 2. Request Gemini Transcription in background with resilient bridge
+      transcribeAudioWithIAU(result.base64, result.mimeType)
+        .then((transcript) => {
+          if (transcript) {
             setAttachments((prev) =>
               prev.map((att) =>
                 att.id === newAttachment.id
                   ? {
                       ...att,
-                      transcript: data.transcript,
+                      transcript,
                       transcriptStatus: 'completed',
                     }
                   : att
@@ -268,23 +261,16 @@ export const RecordEditor: React.FC<RecordEditorProps> = ({
 
     setIsOrganizing(true);
     try {
-      const res = await fetch('/api/gemini/organize-record', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content, title }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.suggestedTitle && !title.trim()) {
-          setTitle(data.suggestedTitle);
-        }
-        if (data.suggestedCategory) {
-          setCategory(data.suggestedCategory);
-        }
-        if (Array.isArray(data.suggestedTags)) {
-          const merged = Array.from(new Set([...tags, ...data.suggestedTags]));
-          setTags(merged);
-        }
+      const data = await organizeRecordWithIAU(content, title);
+      if (data.suggestedTitle && !title.trim()) {
+        setTitle(data.suggestedTitle);
+      }
+      if (data.suggestedCategory) {
+        setCategory(data.suggestedCategory);
+      }
+      if (Array.isArray(data.suggestedTags) && data.suggestedTags.length > 0) {
+        const merged = Array.from(new Set([...tags, ...data.suggestedTags]));
+        setTags(merged);
       }
     } catch (e) {
       console.warn('AI Organize failed:', e);

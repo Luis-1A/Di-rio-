@@ -7,6 +7,7 @@ import {
 } from '../lib/firestoreService';
 import { auth } from '../lib/firebase';
 import { deleteUser } from 'firebase/auth';
+import { getCustomGeminiKey, saveCustomGeminiKey } from '../lib/geminiBridge';
 import {
   BrainCircuit,
   Volume2,
@@ -18,6 +19,7 @@ import {
   Shield,
   Sliders,
   AlertTriangle,
+  Key,
 } from 'lucide-react';
 
 interface IAUProfileViewProps {
@@ -300,7 +302,41 @@ export const IAUProfileView: React.FC<IAUProfileViewProps> = ({
         </div>
       </form>
 
-      {/* 3. Export & Data Sovereignty */}
+      {/* 3. Chave Gemini API (Google AI Studio) */}
+      <div className="bg-stone-900/60 border border-stone-800 rounded-2xl p-5 space-y-3">
+        <h3 className="text-xs font-bold uppercase tracking-wider text-stone-300 flex items-center gap-1.5">
+          <Key className="w-3.5 h-3.5 text-amber-400" />
+          <span>Conexão da IAU Central (Chave Gemini API)</span>
+        </h3>
+        <p className="text-xs text-stone-400 leading-relaxed">
+          A IAU Central utiliza os modelos Gemini da Google AI Studio. Em deploys externos (como Vercel), você pode fornecer sua chave diretamente para comunicação instantânea.
+        </p>
+        <div className="flex flex-col sm:flex-row gap-2 pt-1">
+          <input
+            type="password"
+            defaultValue={getCustomGeminiKey()}
+            id="iau-custom-gemini-key"
+            placeholder="AIzaSy..."
+            className="flex-1 bg-stone-950 border border-stone-700 rounded-xl px-3.5 py-2 text-xs text-stone-100 placeholder:text-stone-600 focus:outline-none focus:border-amber-500"
+          />
+          <button
+            type="button"
+            onClick={() => {
+              const el = document.getElementById('iau-custom-gemini-key') as HTMLInputElement;
+              if (el) {
+                saveCustomGeminiKey(el.value);
+                alert('Chave da IAU Central atualizada com sucesso!');
+              }
+            }}
+            className="px-4 py-2 bg-amber-600 hover:bg-amber-500 text-stone-950 font-bold rounded-xl text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+          >
+            <Save className="w-3.5 h-3.5" />
+            <span>Salvar Chave</span>
+          </button>
+        </div>
+      </div>
+
+      {/* 4. Export & Data Sovereignty */}
       <div className="bg-stone-900/60 border border-stone-800 rounded-2xl p-5 space-y-4">
         <h3 className="text-xs font-bold uppercase tracking-wider text-stone-300 flex items-center gap-1.5">
           <Download className="w-3.5 h-3.5 text-amber-400" />
@@ -319,7 +355,7 @@ export const IAUProfileView: React.FC<IAUProfileViewProps> = ({
         </button>
       </div>
 
-      {/* 4. Danger Zone */}
+      {/* 5. Danger Zone */}
       <div className="bg-red-950/20 border border-red-900/40 rounded-2xl p-5 space-y-3">
         <h3 className="text-xs font-bold uppercase tracking-wider text-red-400 flex items-center gap-1.5">
           <AlertTriangle className="w-3.5 h-3.5" />

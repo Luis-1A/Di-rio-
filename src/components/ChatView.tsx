@@ -14,6 +14,7 @@ import {
 import { findRelevantRecords, findRelevantMemories } from '../lib/memoryEngine';
 import { VoiceDefenseEngine } from '../lib/voiceDefense';
 import { AudioProcessor, AudioCaptureResult } from '../lib/audioProcessor';
+import { executeChatWithIAU, transcribeAudioWithIAU } from '../lib/geminiBridge';
 import {
   Send,
   Sparkles,
@@ -127,41 +128,31 @@ export const ChatView: React.FC<ChatViewProps> = ({
       const relevantRecs = findRelevantRecords(records, text, 4);
       const relevantMems = findRelevantMemories(memories, text, 4);
 
-      // 3. Request IAU Central via Gemini Server
-      const res = await fetch('/api/gemini/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: text,
-          userId: user.uid,
-          userName: user.displayName,
-          history: messages.slice(-8),
-          relevantRecords: relevantRecs.map((r) => ({
-            id: r.id,
-            title: r.title,
-            date: r.date,
-            category: r.category,
-            content: r.content.slice(0, 500),
-            transcripts: (r.attachments || [])
-              .filter((a) => a.transcript)
-              .map((a) => a.transcript),
-          })),
-          relevantMemories: relevantMems.map((m) => ({
-            id: m.id,
-            title: m.title,
-            summary: m.summary,
-            category: m.category,
-          })),
-          iauProfile: iauSettings,
-        }),
+      // 3. Request IAU Central via resilient Gemini Bridge
+      const data = await executeChatWithIAU({
+        message: text,
+        userId: user.uid,
+        userName: user.displayName,
+        history: messages.slice(-8),
+        relevantRecords: relevantRecs.map((r) => ({
+          id: r.id,
+          title: r.title,
+          date: r.date,
+          category: r.category,
+          content: r.content.slice(0, 500),
+          transcripts: (r.attachments || [])
+            .filter((a) => a.transcript)
+            .map((a) => a.transcript),
+        })),
+        relevantMemories: relevantMems.map((m) => ({
+          id: m.id,
+          title: m.title,
+          summary: m.summary,
+          category: m.category,
+        })),
+        iauProfile: iauSettings,
       });
 
-      if (!res.ok) {
-        const errorData = await res.json();
-        throw new Error(errorData.error || 'Erro na comunicação com a IAU Central.');
-      }
-
-      const data = await res.json();
       const reply = data.reply || 'Não consegui processar a resposta.';
 
       // 4. Save IAU Assistant message in Firestore
@@ -221,19 +212,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
       try {
         const capture: AudioCaptureResult = await audioProcessorRef.current.stopRecording();
-        const res = await fetch('/api/gemini/transcribe', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            base64Audio: capture.base64,
-            mimeType: capture.mimeType,
-          }),
-        });
-        const data = await res.json();
-        if (data.transcript) {
-          setInputText(data.transcript);
+        const transcript = await transcribeAudioWithIAU(capture.base64, capture.mimeType);
+        if (transcript) {
+          setInputText(transcript);
           // Auto send transcribed voice question
-          handleSendMessage(data.transcript);
+          handleSendMessage(transcript);
         }
       } catch (err: any) {
         console.error('Voice query transcription error:', err);

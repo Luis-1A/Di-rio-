@@ -2,7 +2,24 @@ import React, { useEffect, useState } from 'react';
 import { SystemHealth } from '../types';
 import { auth, db, storage } from '../lib/firebase';
 import { syncQueue } from '../lib/syncQueue';
-import { CheckCircle, AlertTriangle, XCircle, RefreshCw, X, ShieldCheck, Activity } from 'lucide-react';
+import { getStoredSession } from '../lib/authService';
+import {
+  checkGeminiHealth,
+  getCustomGeminiKey,
+  saveCustomGeminiKey,
+} from '../lib/geminiBridge';
+import {
+  CheckCircle,
+  AlertTriangle,
+  XCircle,
+  RefreshCw,
+  X,
+  Activity,
+  Key,
+  Globe,
+  Check,
+  HelpCircle,
+} from 'lucide-react';
 
 interface DiagnosticsModalProps {
   isOpen: boolean;
@@ -19,7 +36,13 @@ export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({ isOpen, onCl
     syncQueue: 'online',
     lastChecked: new Date().toLocaleTimeString(),
   });
+  const [geminiStatusNote, setGeminiStatusNote] = useState<string>('');
   const [checking, setChecking] = useState(false);
+  const [showKeyInput, setShowKeyInput] = useState(false);
+  const [customKey, setCustomKey] = useState(getCustomGeminiKey());
+  const [saveKeySuccess, setSaveKeySuccess] = useState(false);
+
+  const hostname = typeof window !== 'undefined' ? window.location.hostname : '';
 
   const runDiagnostics = async () => {
     setChecking(true);
@@ -33,8 +56,9 @@ export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({ isOpen, onCl
       lastChecked: new Date().toLocaleTimeString(),
     };
 
-    // 1. Check Auth
-    if (auth.currentUser) {
+    // 1. Check Auth (Session or Firebase Auth)
+    const storedUser = getStoredSession();
+    if (auth.currentUser || storedUser) {
       newHealth.auth = 'online';
     } else {
       newHealth.auth = 'degraded';
@@ -58,17 +82,14 @@ export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({ isOpen, onCl
       newHealth.storage = 'error';
     }
 
-    // 4. Check Gemini Server
+    // 4. Check Gemini / IAU Central Communication
     try {
-      const res = await fetch('/api/health');
-      if (res.ok) {
-        const data = await res.json();
-        newHealth.gemini = data.geminiConfigured ? 'online' : 'degraded';
-      } else {
-        newHealth.gemini = 'error';
-      }
+      const geminiRes = await checkGeminiHealth();
+      newHealth.gemini = geminiRes.status;
+      setGeminiStatusNote(geminiRes.message);
     } catch {
       newHealth.gemini = 'error';
+      setGeminiStatusNote('Erro ao testar comunicação com a IAU Central.');
     }
 
     // 5. Check Audio Engine
@@ -92,9 +113,17 @@ export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({ isOpen, onCl
 
   useEffect(() => {
     if (isOpen) {
+      setCustomKey(getCustomGeminiKey());
       runDiagnostics();
     }
   }, [isOpen]);
+
+  const handleSaveCustomKey = () => {
+    saveCustomGeminiKey(customKey);
+    setSaveKeySuccess(true);
+    setTimeout(() => setSaveKeySuccess(false), 2000);
+    runDiagnostics();
+  };
 
   if (!isOpen) return null;
 
@@ -127,13 +156,16 @@ export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({ isOpen, onCl
 
   return (
     <div id="diagnostics-modal" className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-950/80 backdrop-blur-sm">
-      <div className="bg-stone-900 border border-stone-800 rounded-2xl w-full max-w-lg p-6 shadow-2xl relative">
+      <div className="bg-stone-900 border border-stone-800 rounded-2xl w-full max-w-lg p-6 shadow-2xl relative max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between border-b border-stone-800 pb-4 mb-5">
           <div className="flex items-center gap-2.5">
             <Activity className="w-5 h-5 text-amber-400" />
             <div>
               <h2 className="text-lg font-bold text-stone-100">Diagnóstico do Sistema</h2>
-              <p className="text-xs text-stone-400">Verificação de integridade e serviços</p>
+              <div className="flex items-center gap-1.5 text-xs text-stone-400">
+                <Globe className="w-3 h-3 text-stone-500" />
+                <span>{hostname || 'localhost'}</span>
+              </div>
             </div>
           </div>
           <button
@@ -169,12 +201,61 @@ export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({ isOpen, onCl
             {renderStatusBadge(health.storage)}
           </div>
 
-          <div className="flex items-center justify-between p-3 rounded-xl bg-stone-950 border border-stone-800">
-            <div>
-              <div className="text-sm font-medium text-stone-200">IAU Central (Gemini)</div>
-              <div className="text-xs text-stone-500">Cérebro, transcrição e memórias</div>
+          <div className="p-3 rounded-xl bg-stone-950 border border-stone-800 space-y-2">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-sm font-medium text-stone-200">IAU Central (Gemini)</div>
+                <div className="text-xs text-stone-500">Cérebro, transcrição e memórias</div>
+              </div>
+              {renderStatusBadge(health.gemini)}
             </div>
-            {renderStatusBadge(health.gemini)}
+
+            {geminiStatusNote && (
+              <div className="text-xs text-stone-400 pt-1 border-t border-stone-900 flex items-start gap-1.5">
+                <HelpCircle className="w-3.5 h-3.5 text-stone-500 shrink-0 mt-0.5" />
+                <span>{geminiStatusNote}</span>
+              </div>
+            )}
+
+            {/* Quick Gemini Key Configuration Toggle */}
+            <div className="pt-2">
+              <button
+                type="button"
+                onClick={() => setShowKeyInput(!showKeyInput)}
+                className="text-xs text-amber-400 hover:text-amber-300 underline flex items-center gap-1 cursor-pointer"
+              >
+                <Key className="w-3 h-3" />
+                <span>{showKeyInput ? 'Ocultar chave Gemini' : 'Configurar Chave Gemini do Diário'}</span>
+              </button>
+
+              {showKeyInput && (
+                <div className="mt-2.5 p-3 rounded-xl bg-stone-900 border border-stone-800 space-y-2">
+                  <label className="block text-xs text-stone-300 font-medium">
+                    Chave Gemini API (Google AI Studio):
+                  </label>
+                  <div className="flex gap-2">
+                    <input
+                      type="password"
+                      value={customKey}
+                      onChange={(e) => setCustomKey(e.target.value)}
+                      placeholder="AIzaSy..."
+                      className="flex-1 bg-stone-950 border border-stone-700 rounded-lg px-3 py-1.5 text-xs text-stone-100 placeholder:text-stone-600 focus:outline-none focus:border-amber-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleSaveCustomKey}
+                      className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-stone-950 font-bold rounded-lg text-xs flex items-center gap-1 transition-colors cursor-pointer"
+                    >
+                      {saveKeySuccess ? <Check className="w-3.5 h-3.5" /> : null}
+                      <span>Salvar</span>
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-stone-500 leading-relaxed">
+                    Em hospedagens como Vercel, a chave pode ser definida no painel como <code>GEMINI_API_KEY</code> ou salva diretamente aqui no navegador para ativação imediata.
+                  </p>
+                </div>
+              )}
+            </div>
           </div>
 
           <div className="flex items-center justify-between p-3 rounded-xl bg-stone-950 border border-stone-800">
@@ -201,7 +282,7 @@ export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({ isOpen, onCl
           <button
             onClick={runDiagnostics}
             disabled={checking}
-            className="px-4 py-2 bg-stone-800 hover:bg-stone-700 disabled:opacity-50 text-stone-200 rounded-xl text-xs font-semibold flex items-center gap-2 transition-colors"
+            className="px-4 py-2 bg-stone-800 hover:bg-stone-700 disabled:opacity-50 text-stone-200 rounded-xl text-xs font-semibold flex items-center gap-2 transition-colors cursor-pointer"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${checking ? 'animate-spin' : ''}`} />
             <span>Verificar Agora</span>
