@@ -158,6 +158,14 @@ export async function saveRecord(
       ...fullRecord,
       _serverTimestamp: serverTimestamp(),
     });
+    // If it was in the sync queue, mark as synced
+    const pendingList = syncQueue.getPendingItems();
+    const existingInQueue = pendingList.find(
+      (p) => p.operationId === opId || (p.payload?.record?.id === recordId)
+    );
+    if (existingInQueue) {
+      syncQueue.markSynced(existingInQueue.id);
+    }
     return fullRecord;
   } catch (error: any) {
     console.error('Firestore save failed for record:', error);
@@ -374,34 +382,47 @@ export async function uploadFileToStorage(
 /**
  * 6. Flusher for Offline Queue
  */
-export async function flushSyncQueue(uid: string): Promise<void> {
+export async function flushSyncQueue(
+  uid: string
+): Promise<{ synced: number; failed: number }> {
   const items = syncQueue.getPendingItems();
+  let synced = 0;
+  let failed = 0;
+
   for (const item of items) {
     try {
       syncQueue.markProcessing(item.id);
       if (item.entityType === 'record') {
         const { record } = item.payload;
-        const docRef = doc(db, 'users', uid, 'records', record.id);
-        await setDoc(docRef, {
-          ...record,
-          syncStatus: 'synced',
-          _serverTimestamp: serverTimestamp(),
-        });
+        if (record && record.id) {
+          const docRef = doc(db, 'users', uid, 'records', record.id);
+          await setDoc(docRef, {
+            ...record,
+            syncStatus: 'synced',
+            _serverTimestamp: serverTimestamp(),
+          });
+        }
       } else if (item.entityType === 'message') {
         const { message } = item.payload;
-        const docRef = doc(db, 'users', uid, 'messages', message.id);
-        await setDoc(docRef, {
-          ...message,
-          syncStatus: 'synced',
-          _serverTimestamp: serverTimestamp(),
-        });
+        if (message && message.id) {
+          const docRef = doc(db, 'users', uid, 'messages', message.id);
+          await setDoc(docRef, {
+            ...message,
+            syncStatus: 'synced',
+            _serverTimestamp: serverTimestamp(),
+          });
+        }
       }
       syncQueue.markSynced(item.id);
+      synced++;
     } catch (e: any) {
       console.warn(`Sync queue flush failed for item ${item.id}:`, e);
       syncQueue.markFailed(item.id, e.message || 'Erro de sincronização.');
+      failed++;
     }
   }
+
+  return { synced, failed };
 }
 
 /**

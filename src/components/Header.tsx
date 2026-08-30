@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { UserProfile, SyncQueueItem } from '../types';
 import { syncQueue } from '../lib/syncQueue';
+import { flushSyncQueue } from '../lib/firestoreService';
 import { logoutUser } from '../lib/authService';
 import {
   BookOpen,
@@ -30,9 +31,15 @@ export const Header: React.FC<HeaderProps> = ({
 }) => {
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [queueItems, setQueueItems] = useState<SyncQueueItem[]>([]);
+  const [isFlushing, setIsFlushing] = useState(false);
 
   useEffect(() => {
-    const handleOnline = () => setIsOnline(true);
+    const handleOnline = () => {
+      setIsOnline(true);
+      if (user?.uid) {
+        flushSyncQueue(user.uid).catch(() => {});
+      }
+    };
     const handleOffline = () => setIsOnline(false);
 
     window.addEventListener('online', handleOnline);
@@ -47,7 +54,19 @@ export const Header: React.FC<HeaderProps> = ({
       window.removeEventListener('offline', handleOffline);
       unsubscribe();
     };
-  }, []);
+  }, [user?.uid]);
+
+  const handleManualSync = async () => {
+    if (!user?.uid || isFlushing) return;
+    setIsFlushing(true);
+    try {
+      await flushSyncQueue(user.uid);
+    } catch (e) {
+      console.warn('Manual sync attempt:', e);
+    } finally {
+      setIsFlushing(false);
+    }
+  };
 
   const pendingCount = queueItems.filter((q) => q.status === 'pending' || q.status === 'processing').length;
   const failedCount = queueItems.filter((q) => q.status === 'failed').length;
@@ -62,21 +81,38 @@ export const Header: React.FC<HeaderProps> = ({
       );
     }
 
+    if (isFlushing) {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-950/80 border border-amber-800 text-amber-300">
+          <RefreshCw className="w-3 h-3 text-amber-400 animate-spin" />
+          <span>Sincronizando...</span>
+        </span>
+      );
+    }
+
     if (failedCount > 0) {
       return (
-        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-red-950/80 border border-red-800 text-red-300" title={`${failedCount} falha(s) de envio. Tentando reconectar.`}>
+        <button
+          onClick={handleManualSync}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-red-950/80 border border-red-800 text-red-300 hover:bg-red-900/80 transition-colors cursor-pointer"
+          title="Clique para forçar o envio dos registros pendentes ao Firebase"
+        >
           <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" />
-          <span>⚠ {failedCount} Pendente(s)</span>
-        </span>
+          <span>⚠ {failedCount} Pendente(s) • Tocar p/ Sincronizar</span>
+        </button>
       );
     }
 
     if (pendingCount > 0) {
       return (
-        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-950/80 border border-amber-800 text-amber-300">
+        <button
+          onClick={handleManualSync}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-950/80 border border-amber-800 text-amber-300 hover:bg-amber-900/80 transition-colors cursor-pointer"
+          title="Sincronizando com Firebase"
+        >
           <RefreshCw className="w-3 h-3 text-amber-400 animate-spin" />
           <span>⏳ Sincronizando</span>
-        </span>
+        </button>
       );
     }
 

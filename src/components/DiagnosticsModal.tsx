@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { SystemHealth } from '../types';
 import { auth, db, storage } from '../lib/firebase';
 import { syncQueue } from '../lib/syncQueue';
+import { flushSyncQueue } from '../lib/firestoreService';
 import { getStoredSession } from '../lib/authService';
 import {
   checkGeminiHealth,
@@ -19,6 +20,8 @@ import {
   Globe,
   Check,
   HelpCircle,
+  Trash2,
+  Send,
 } from 'lucide-react';
 
 interface DiagnosticsModalProps {
@@ -41,6 +44,8 @@ export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({ isOpen, onCl
   const [showKeyInput, setShowKeyInput] = useState(false);
   const [customKey, setCustomKey] = useState(getCustomGeminiKey());
   const [saveKeySuccess, setSaveKeySuccess] = useState(false);
+  const [flushingQueue, setFlushingQueue] = useState(false);
+  const [flushResultNote, setFlushResultNote] = useState<string | null>(null);
 
   const hostname = typeof window !== 'undefined' ? window.location.hostname : '';
 
@@ -122,6 +127,32 @@ export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({ isOpen, onCl
     saveCustomGeminiKey(customKey);
     setSaveKeySuccess(true);
     setTimeout(() => setSaveKeySuccess(false), 2000);
+    runDiagnostics();
+  };
+
+  const handleForceFlushQueue = async () => {
+    const storedUser = getStoredSession();
+    const uid = auth.currentUser?.uid || storedUser?.uid;
+    if (!uid) {
+      setFlushResultNote('Nenhum usuário ativo para sincronizar.');
+      return;
+    }
+    setFlushingQueue(true);
+    setFlushResultNote(null);
+    try {
+      const res = await flushSyncQueue(uid);
+      setFlushResultNote(`Sincronizado com sucesso: ${res.synced} enviado(s), ${res.failed} falha(s).`);
+      runDiagnostics();
+    } catch (e: any) {
+      setFlushResultNote(`Erro ao sincronizar: ${e.message}`);
+    } finally {
+      setFlushingQueue(false);
+    }
+  };
+
+  const handleClearQueue = () => {
+    syncQueue.clearQueue();
+    setFlushResultNote('Fila de sincronização limpa.');
     runDiagnostics();
   };
 
@@ -266,14 +297,46 @@ export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({ isOpen, onCl
             {renderStatusBadge(health.audioEngine)}
           </div>
 
-          <div className="flex items-center justify-between p-3 rounded-xl bg-stone-950 border border-stone-800">
-            <div>
-              <div className="text-sm font-medium text-stone-200">Fila de Sincronização</div>
-              <div className="text-xs text-stone-500">
-                {syncQueue.getPendingItems().length} itens pendentes de sincronização
+          {/* Sync Queue Card with Flush & Clear actions */}
+          <div className="p-3 rounded-xl bg-stone-950 border border-stone-800 space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-sm font-medium text-stone-200">Fila de Sincronização</div>
+                <div className="text-xs text-stone-500">
+                  {syncQueue.getPendingItems().length} item(ns) pendente(s) de envio ao Firestore
+                </div>
               </div>
+              {renderStatusBadge(health.syncQueue)}
             </div>
-            {renderStatusBadge(health.syncQueue)}
+
+            <div className="flex items-center gap-2 pt-1">
+              <button
+                type="button"
+                onClick={handleForceFlushQueue}
+                disabled={flushingQueue || syncQueue.getPendingItems().length === 0}
+                className="px-3 py-1.5 bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 border border-amber-500/30 rounded-lg text-xs font-semibold flex items-center gap-1.5 disabled:opacity-40 transition-colors cursor-pointer"
+              >
+                <Send className="w-3 h-3" />
+                <span>{flushingQueue ? 'Enviando...' : 'Forçar Envio ao Firebase'}</span>
+              </button>
+
+              {syncQueue.getPendingItems().length > 0 && (
+                <button
+                  type="button"
+                  onClick={handleClearQueue}
+                  className="px-3 py-1.5 bg-stone-800 hover:bg-red-950/60 text-stone-400 hover:text-red-300 border border-stone-700 hover:border-red-800 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <Trash2 className="w-3 h-3" />
+                  <span>Limpar Fila</span>
+                </button>
+              )}
+            </div>
+
+            {flushResultNote && (
+              <div className="text-xs text-amber-400 bg-amber-950/40 p-2 rounded-lg border border-amber-800/60">
+                {flushResultNote}
+              </div>
+            )}
           </div>
         </div>
 
@@ -292,3 +355,4 @@ export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({ isOpen, onCl
     </div>
   );
 };
+
