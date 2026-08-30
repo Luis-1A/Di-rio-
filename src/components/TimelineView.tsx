@@ -108,28 +108,28 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
   return (
     <div id="timeline-view-container" className="max-w-4xl mx-auto px-4 py-6 space-y-8">
       <div>
-        <h2 className="text-xl font-bold font-serif text-stone-100">Linha do Tempo</h2>
-        <p className="text-xs text-stone-400">
-          A história cronológica da sua vida digital e memórias
+        <h2 className="text-xl font-serif font-semibold text-stone-800">Linha do Tempo</h2>
+        <p className="text-xs text-stone-500 mt-0.5">
+          Sua história em ordem cronológica de registros e momentos
         </p>
       </div>
 
       {groupedTimeline.length === 0 ? (
-        <div className="bg-stone-900/30 border border-stone-800/60 rounded-2xl p-12 text-center text-stone-500">
-          <Clock className="w-10 h-10 text-stone-600 mx-auto mb-3" />
-          <h3 className="text-sm font-medium text-stone-300">Linha do tempo vazia</h3>
+        <div className="bg-white border border-stone-200/80 rounded-2xl p-12 text-center text-stone-500 shadow-xs">
+          <Clock className="w-10 h-10 text-stone-400 mx-auto mb-3" />
+          <h3 className="text-sm font-medium text-stone-700">Linha do tempo vazia</h3>
           <p className="text-xs text-stone-500 mt-1 max-w-sm mx-auto">
-            Crie registros ou converse com a IAU para iniciar sua linha do tempo histórica.
+            Crie novos registros para visualizar a linha do tempo do seu diário.
           </p>
         </div>
       ) : (
-        <div className="relative border-l border-stone-800 pl-6 ml-4 sm:ml-8 space-y-10">
+        <div className="relative border-l border-stone-200 pl-6 ml-4 sm:ml-8 space-y-10">
           {groupedTimeline.map((group) => (
             <div key={group.dateStr} className="space-y-4">
               {/* Date Header Marker */}
               <div className="relative">
-                <div className="absolute -left-[31px] top-1 w-3.5 h-3.5 rounded-full bg-amber-500 border-4 border-stone-950 shadow-md" />
-                <span className="text-xs font-bold font-mono tracking-wider text-amber-400 bg-stone-900 px-3 py-1 rounded-lg border border-stone-800">
+                <div className="absolute -left-[31px] top-1 w-3.5 h-3.5 rounded-full bg-amber-600 border-4 border-[#fbfaf8] shadow-xs" />
+                <span className="text-xs font-semibold font-mono tracking-wider text-amber-800 bg-amber-50 px-3 py-1 rounded-lg border border-amber-200">
                   {formatDateHeader(group.dateStr)}
                 </span>
               </div>
@@ -143,24 +143,24 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                       <div
                         key={item.id}
                         onClick={() => onSelectRecord(rec)}
-                        className="bg-stone-900/80 hover:bg-stone-900 border border-stone-800 hover:border-stone-700 rounded-2xl p-4 transition-all cursor-pointer shadow-sm group"
+                        className="bg-white hover:bg-stone-50 border border-stone-200/90 rounded-2xl p-4 transition-all cursor-pointer shadow-xs group"
                       >
                         <div className="flex items-center justify-between gap-2 mb-2 text-xs">
                           <div className="flex items-center gap-2">
-                            <span className="p-1 rounded bg-stone-950 border border-stone-800 text-stone-300">
-                              {rec.type === 'photo' && <ImageIcon className="w-3.5 h-3.5 text-sky-400" />}
-                              {rec.type === 'audio' && <Mic className="w-3.5 h-3.5 text-emerald-400" />}
-                              {rec.type === 'video' && <Video className="w-3.5 h-3.5 text-purple-400" />}
-                              {rec.type === 'document' && <FileText className="w-3.5 h-3.5 text-amber-400" />}
-                              {rec.type === 'text' && <FileText className="w-3.5 h-3.5 text-stone-300" />}
+                            <span className="p-1 rounded-lg bg-stone-100 border border-stone-200 text-stone-600">
+                              {rec.type === 'photo' && <ImageIcon className="w-3.5 h-3.5 text-sky-600" />}
+                              {rec.type === 'audio' && <Mic className="w-3.5 h-3.5 text-emerald-600" />}
+                              {rec.type === 'video' && <Video className="w-3.5 h-3.5 text-purple-600" />}
+                              {rec.type === 'document' && <FileText className="w-3.5 h-3.5 text-amber-600" />}
+                              {rec.type === 'text' && <FileText className="w-3.5 h-3.5 text-stone-600" />}
                             </span>
-                            <span className="font-semibold text-stone-200 group-hover:text-amber-400 transition-colors">
+                            <span className="font-medium text-stone-800 group-hover:text-amber-700 transition-colors">
                               {rec.title}
                             </span>
                           </div>
-                          <span className="text-[10px] text-stone-500 font-mono">{item.timeStr}</span>
+                          <span className="text-[10px] text-stone-400 font-mono">{item.timeStr}</span>
                         </div>
-                        <p className="text-xs text-stone-400 line-clamp-2 leading-relaxed">
+                        <p className="text-xs text-stone-600 line-clamp-2 leading-relaxed">
                           {rec.content || '(Sem texto)'}
                         </p>
                       </div>
@@ -172,16 +172,16 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                     return (
                       <div
                         key={item.id}
-                        className="bg-amber-950/20 border border-amber-900/40 rounded-2xl p-4 shadow-sm"
+                        className="bg-amber-50/70 border border-amber-200/70 rounded-2xl p-4 shadow-xs"
                       >
                         <div className="flex items-center justify-between gap-2 mb-1.5 text-xs">
-                          <div className="flex items-center gap-2 text-amber-300 font-semibold">
-                            <Bookmark className="w-3.5 h-3.5 text-amber-400" />
-                            <span>Memória Estruturada: {mem.title}</span>
+                          <div className="flex items-center gap-2 text-amber-900 font-medium">
+                            <Bookmark className="w-3.5 h-3.5 text-amber-600" />
+                            <span>Memória Guardada: {mem.title}</span>
                           </div>
-                          <span className="text-[10px] text-stone-500 font-mono">{item.timeStr}</span>
+                          <span className="text-[10px] text-stone-400 font-mono">{item.timeStr}</span>
                         </div>
-                        <p className="text-xs text-stone-300 leading-relaxed">{mem.summary}</p>
+                        <p className="text-xs text-stone-700 leading-relaxed">{mem.summary}</p>
                       </div>
                     );
                   }

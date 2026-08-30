@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { DiaryRecord, MemoryItem, UserProfile } from '../types';
 import {
   Sparkles,
@@ -8,10 +8,11 @@ import {
   Mic,
   Video,
   File,
+  Play,
+  Pause,
   ArrowRight,
-  BrainCircuit,
-  Calendar,
-  Bookmark,
+  Clock,
+  ExternalLink,
 } from 'lucide-react';
 
 interface DashboardViewProps {
@@ -28,211 +29,314 @@ interface DashboardViewProps {
 export const DashboardView: React.FC<DashboardViewProps> = ({
   user,
   records,
-  memories,
   onNewRecord,
   onOpenChat,
   onSelectRecord,
   onViewAllRecords,
-  onViewAllMemories,
 }) => {
   const activeRecords = records.filter((r) => !r.isDeleted);
-  const recentRecords = activeRecords.slice(0, 4);
-  const recentMemories = memories.slice(0, 3);
+  const recentRecords = activeRecords.slice(0, 10);
+  const [playingAudioId, setPlayingAudioId] = useState<string | null>(null);
 
-  const getRecordIcon = (type: string) => {
+  const getRecordBadge = (type: string) => {
     switch (type) {
       case 'photo':
-        return <ImageIcon className="w-4 h-4 text-sky-400" />;
+        return (
+          <span className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-700 bg-amber-50 px-2 py-0.5 rounded-md border border-amber-200/60">
+            <ImageIcon className="w-3 h-3 text-amber-600" />
+            <span>Foto</span>
+          </span>
+        );
       case 'audio':
-        return <Mic className="w-4 h-4 text-emerald-400" />;
+        return (
+          <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200/60">
+            <Mic className="w-3 h-3 text-emerald-600" />
+            <span>Áudio</span>
+          </span>
+        );
       case 'video':
-        return <Video className="w-4 h-4 text-purple-400" />;
+        return (
+          <span className="inline-flex items-center gap-1 text-[11px] font-medium text-rose-700 bg-rose-50 px-2 py-0.5 rounded-md border border-rose-200/60">
+            <Video className="w-3 h-3 text-rose-600" />
+            <span>Vídeo</span>
+          </span>
+        );
       case 'document':
-        return <File className="w-4 h-4 text-amber-400" />;
+        return (
+          <span className="inline-flex items-center gap-1 text-[11px] font-medium text-blue-700 bg-blue-50 px-2 py-0.5 rounded-md border border-blue-200/60">
+            <File className="w-3 h-3 text-blue-600" />
+            <span>Arquivo</span>
+          </span>
+        );
       default:
-        return <FileText className="w-4 h-4 text-stone-300" />;
+        return (
+          <span className="inline-flex items-center gap-1 text-[11px] font-medium text-stone-600 bg-stone-100 px-2 py-0.5 rounded-md border border-stone-200/60">
+            <FileText className="w-3 h-3 text-stone-500" />
+            <span>Texto</span>
+          </span>
+        );
     }
   };
 
-  const formatDate = (isoString: string) => {
+  const formatFeedTime = (dateStr: string, createdAt: string) => {
     try {
-      const d = new Date(isoString);
-      return d.toLocaleDateString('pt-BR', {
-        day: '2-digit',
-        month: 'short',
-        year: 'numeric',
+      const now = new Date();
+      const created = new Date(createdAt || dateStr);
+      
+      const isToday =
+        now.getFullYear() === created.getFullYear() &&
+        now.getMonth() === created.getMonth() &&
+        now.getDate() === created.getDate();
+
+      const yesterday = new Date(now);
+      yesterday.setDate(now.getDate() - 1);
+      const isYesterday =
+        yesterday.getFullYear() === created.getFullYear() &&
+        yesterday.getMonth() === created.getMonth() &&
+        yesterday.getDate() === created.getDate();
+
+      const timeStr = created.toLocaleTimeString('pt-BR', {
+        hour: '2-digit',
+        minute: '2-digit',
       });
+
+      if (isToday) return `Hoje, ${timeStr}`;
+      if (isYesterday) return `Ontem, ${timeStr}`;
+
+      return created.toLocaleDateString('pt-BR', {
+        day: 'numeric',
+        month: 'short',
+      }) + `, ${timeStr}`;
     } catch {
-      return isoString;
+      return dateStr || '';
+    }
+  };
+
+  const toggleAudio = (e: React.MouseEvent, recordId: string, audioUrl?: string) => {
+    e.stopPropagation();
+    if (!audioUrl) return;
+    if (playingAudioId === recordId) {
+      setPlayingAudioId(null);
+    } else {
+      setPlayingAudioId(recordId);
+      const audio = new Audio(audioUrl);
+      audio.play().catch(() => {});
+      audio.onended = () => setPlayingAudioId(null);
     }
   };
 
   return (
-    <div id="dashboard-view" className="max-w-4xl mx-auto px-4 py-6 sm:py-8 space-y-8">
-      {/* 1. IAU Central Hub Card */}
-      <div className="bg-stone-900/90 border border-stone-800 rounded-2xl p-6 sm:p-7 shadow-xl relative overflow-hidden">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div className="flex items-start gap-4">
-            <div className="w-12 h-12 rounded-2xl bg-amber-600/10 border border-amber-500/20 flex items-center justify-center text-amber-400 shrink-0 shadow-inner">
-              <BrainCircuit className="w-6 h-6" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2.5">
-                <h2 className="text-xl font-bold font-serif text-stone-100">IAU Central</h2>
-                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-950/80 border border-emerald-800 text-emerald-300">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                  Online
-                </span>
-              </div>
-              <p className="text-stone-400 text-sm mt-1 max-w-lg">
-                Seu cérebro digital conectado ao seu arquivo. Pergunte sobre eventos passados, peça análises ou converse com voz.
-              </p>
-            </div>
+    <div id="dashboard-feed" className="max-w-md md:max-w-lg mx-auto px-4 py-4 space-y-5">
+      {/* 1. IA Central Card (Top) */}
+      <div className="bg-white border border-stone-100 rounded-3xl p-5 shadow-[0_2px_12px_rgba(0,0,0,0.03)] relative overflow-hidden">
+        <div className="flex items-start gap-3 mb-2">
+          <div className="w-6 h-6 rounded-full bg-orange-50 flex items-center justify-center text-orange-500 mt-0.5">
+            <Sparkles className="w-3.5 h-3.5" />
           </div>
+          <div>
+            <h2 className="text-sm font-semibold text-stone-800">IA Central</h2>
+            <p className="text-xs text-stone-500 mt-0.5 leading-relaxed">
+              Converse comigo ou encontre algo no seu arquivo.
+            </p>
+          </div>
+        </div>
 
+        <div className="mt-3">
           <button
             onClick={onOpenChat}
-            className="inline-flex items-center justify-center gap-2 px-5 py-2.5 bg-amber-600 hover:bg-amber-500 text-stone-950 font-semibold rounded-xl text-sm transition-all shadow-md shadow-amber-900/20 cursor-pointer self-start sm:self-center shrink-0"
+            className="w-auto px-4 py-2 bg-orange-600 hover:bg-orange-700 active:scale-98 text-white text-xs font-semibold rounded-full shadow-sm transition-all cursor-pointer inline-flex items-center gap-1.5"
           >
-            <Sparkles className="w-4 h-4" />
-            <span>Conversar com IAU</span>
+            <span>Conversar com a IA</span>
           </button>
         </div>
       </div>
 
-      {/* 2. Quick Action Bar */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h3 className="text-lg font-bold text-stone-200">Arquivo Pessoal</h3>
-          <p className="text-xs text-stone-500">
-            {activeRecords.length} registro(s) salvos no Firebase
-          </p>
-        </div>
+      {/* 2. Seus Registros Header */}
+      <div className="flex items-center justify-between pt-1">
+        <h3 className="text-sm font-semibold text-stone-800 tracking-tight">
+          Seus registros
+        </h3>
 
         <button
           onClick={onNewRecord}
-          className="inline-flex items-center gap-2 px-4 py-2 bg-stone-900 hover:bg-stone-800 border border-stone-800 hover:border-amber-500/40 text-stone-100 rounded-xl text-sm font-semibold transition-colors cursor-pointer"
+          className="inline-flex items-center gap-1 text-xs font-medium text-orange-600 hover:text-orange-700 bg-orange-50/80 hover:bg-orange-100/70 px-2.5 py-1 rounded-full transition-colors cursor-pointer"
         >
-          <Plus className="w-4 h-4 text-amber-400" />
-          <span>Novo Registro</span>
+          <Plus className="w-3 h-3 stroke-[2.5]" />
+          <span>Novo registro</span>
         </button>
       </div>
 
-      {/* 3. Últimos Registros */}
-      <div className="space-y-3">
-        <div className="flex items-center justify-between text-xs text-stone-400 font-semibold uppercase tracking-wider">
-          <span>Últimos registros</span>
-          {activeRecords.length > 4 && (
-            <button
-              onClick={onViewAllRecords}
-              className="text-amber-400 hover:underline flex items-center gap-1 cursor-pointer font-sans"
-            >
-              <span>Ver todos</span>
-              <ArrowRight className="w-3 h-3" />
-            </button>
-          )}
-        </div>
-
-        {recentRecords.length === 0 ? (
-          <div className="bg-stone-900/50 border border-stone-800/80 rounded-2xl p-8 text-center">
-            <Calendar className="w-8 h-8 text-stone-600 mx-auto mb-3" />
-            <h4 className="text-sm font-medium text-stone-300">Nenhum registro ainda</h4>
-            <p className="text-xs text-stone-500 mt-1 max-w-sm mx-auto">
-              Seu arquivo começa aqui. Crie seu primeiro registro de texto, áudio, foto ou pensamento.
-            </p>
-            <button
-              onClick={onNewRecord}
-              className="mt-4 px-4 py-2 bg-amber-600/20 text-amber-400 border border-amber-500/30 rounded-xl text-xs font-semibold hover:bg-amber-600/30 transition-colors"
-            >
-              Criar Primeiro Registro
-            </button>
+      {/* 3. Feed List */}
+      {recentRecords.length === 0 ? (
+        <div className="bg-white border border-stone-100 rounded-3xl p-8 text-center space-y-3 shadow-xs">
+          <div className="w-10 h-10 rounded-full bg-orange-50 text-orange-600 flex items-center justify-center mx-auto">
+            <FileText className="w-5 h-5" />
           </div>
-        ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {recentRecords.map((rec) => (
+          <div className="space-y-1">
+            <h4 className="text-sm font-medium text-stone-800">Nenhum registro ainda</h4>
+            <p className="text-xs text-stone-500 max-w-xs mx-auto">
+              Guarde textos, fotos, áudios, vídeos e arquivos com total facilidade.
+            </p>
+          </div>
+          <button
+            onClick={onNewRecord}
+            className="inline-flex items-center gap-1.5 px-4 py-2 bg-orange-600 hover:bg-orange-700 text-white rounded-full text-xs font-medium transition-colors cursor-pointer"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            <span>Criar primeiro registro</span>
+          </button>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {recentRecords.map((record) => {
+            const photoAttachment = record.attachments?.find(
+              (a) => a.type === 'image' || a.mimeType?.startsWith('image/')
+            );
+            const videoAttachment = record.attachments?.find(
+              (a) => a.type === 'video' || a.mimeType?.startsWith('video/')
+            );
+            const audioAttachment = record.attachments?.find(
+              (a) => a.type === 'audio' || a.mimeType?.startsWith('audio/')
+            );
+            const docAttachment = record.attachments?.find(
+              (a) => a.type === 'document' || (!photoAttachment && !videoAttachment && !audioAttachment && a.url)
+            );
+
+            return (
               <div
-                key={rec.id}
-                onClick={() => onSelectRecord(rec)}
-                className="bg-stone-900/80 hover:bg-stone-900 border border-stone-800 hover:border-stone-700 rounded-xl p-4 transition-all cursor-pointer group flex flex-col justify-between"
+                key={record.id}
+                onClick={() => onSelectRecord(record)}
+                className="bg-white hover:bg-stone-50/50 border border-stone-100/90 rounded-3xl p-4 transition-all duration-150 cursor-pointer shadow-[0_2px_10px_rgba(0,0,0,0.02)] group space-y-2.5"
               >
-                <div>
-                  <div className="flex items-center justify-between gap-2 mb-2">
-                    <div className="flex items-center gap-2">
-                      <div className="p-1.5 rounded-lg bg-stone-950 border border-stone-800">
-                        {getRecordIcon(rec.type)}
-                      </div>
-                      <span className="text-xs text-stone-500">{formatDate(rec.createdAt)}</span>
-                    </div>
-                    {rec.category && (
-                      <span className="text-[11px] px-2 py-0.5 rounded-md bg-stone-950 border border-stone-800 text-stone-400 font-medium">
-                        {rec.category}
-                      </span>
-                    )}
-                  </div>
-                  <h4 className="font-semibold text-sm text-stone-200 group-hover:text-amber-400 transition-colors line-clamp-1">
-                    {rec.title || 'Sem título'}
-                  </h4>
-                  <p className="text-xs text-stone-400 mt-1.5 line-clamp-2 leading-relaxed">
-                    {rec.content || '(Sem texto adicional)'}
-                  </p>
+                {/* Top Badge & Date/Time */}
+                <div className="flex items-center justify-between gap-2">
+                  {getRecordBadge(record.type)}
+                  <span className="text-[11px] text-stone-400 font-normal">
+                    {formatFeedTime(record.date, record.createdAt)}
+                  </span>
                 </div>
 
-                {rec.attachments && rec.attachments.length > 0 && (
-                  <div className="mt-3 pt-2 border-t border-stone-800/60 flex items-center gap-2 text-[11px] text-stone-500">
-                    <span>{rec.attachments.length} anexo(s)</span>
+                {/* Title */}
+                <h4 className="text-sm font-bold text-stone-800 leading-snug group-hover:text-orange-700 transition-colors">
+                  {record.title || (record.type === 'text' ? 'Anotação' : 'Registro')}
+                </h4>
+
+                {/* Text Content */}
+                {record.content && (
+                  <p className="text-xs text-stone-600 line-clamp-2 leading-relaxed">
+                    {record.content}
+                  </p>
+                )}
+
+                {/* Photo Preview (Banner) */}
+                {photoAttachment && (
+                  <div className="rounded-2xl overflow-hidden border border-stone-100 bg-stone-100 aspect-video max-h-48 relative">
+                    <img
+                      src={photoAttachment.url}
+                      alt={record.title || 'Foto'}
+                      className="w-full h-full object-cover group-hover:scale-[1.01] transition-transform duration-300"
+                      referrerPolicy="no-referrer"
+                      loading="lazy"
+                    />
+                  </div>
+                )}
+
+                {/* Video Preview (Banner with Play overlay) */}
+                {videoAttachment && (
+                  <div className="rounded-2xl overflow-hidden border border-stone-100 bg-stone-900 aspect-video max-h-48 relative group/vid">
+                    <video
+                      src={videoAttachment.url}
+                      className="w-full h-full object-cover opacity-80"
+                      preload="metadata"
+                    />
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <div className="w-10 h-10 rounded-full bg-white/30 backdrop-blur-md flex items-center justify-center text-white shadow-md group-hover/vid:scale-110 transition-transform">
+                        <Play className="w-5 h-5 fill-white ml-0.5" />
+                      </div>
+                    </div>
+                    <div className="absolute bottom-2.5 right-2.5 bg-black/60 backdrop-blur-xs text-white text-[10px] font-mono px-1.5 py-0.5 rounded-md">
+                      00:42
+                    </div>
+                  </div>
+                )}
+
+                {/* Audio Waveform Player */}
+                {audioAttachment && (
+                  <div
+                    onClick={(e) => toggleAudio(e, record.id, audioAttachment.url)}
+                    className="bg-stone-50/80 border border-stone-200/60 rounded-2xl p-2.5 flex items-center gap-3 hover:bg-orange-50/40 transition-colors"
+                  >
+                    <button
+                      type="button"
+                      className="w-8 h-8 rounded-full bg-orange-600 hover:bg-orange-700 text-white flex items-center justify-center shrink-0 shadow-xs cursor-pointer"
+                    >
+                      {playingAudioId === record.id ? (
+                        <Pause className="w-3.5 h-3.5 fill-current" />
+                      ) : (
+                        <Play className="w-3.5 h-3.5 fill-current ml-0.5" />
+                      )}
+                    </button>
+
+                    {/* Waveform graphic bars */}
+                    <div className="flex-1 flex items-center gap-0.5 h-6">
+                      {[
+                        30, 60, 45, 80, 50, 90, 70, 40, 60, 100, 75, 45, 85, 95, 60, 40,
+                        50, 80, 65, 35, 75, 90, 55, 30, 45, 60, 70, 40,
+                      ].map((h, i) => (
+                        <div
+                          key={i}
+                          className={`w-1 rounded-full transition-all ${
+                            playingAudioId === record.id && i % 3 === 0
+                              ? 'bg-orange-600 animate-pulse'
+                              : 'bg-stone-300'
+                          }`}
+                          style={{ height: `${h}%` }}
+                        />
+                      ))}
+                    </div>
+
+                    <span className="text-[11px] font-mono text-stone-500 shrink-0">
+                      01:24
+                    </span>
+                  </div>
+                )}
+
+                {/* Document File Row */}
+                {docAttachment && (
+                  <div className="bg-stone-50/80 border border-stone-200/60 rounded-2xl p-2.5 flex items-center gap-2.5">
+                    <div className="w-8 h-8 rounded-xl bg-orange-50 border border-orange-100 flex items-center justify-center text-orange-600 shrink-0">
+                      <File className="w-4 h-4" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs font-medium text-stone-800 truncate">
+                        {docAttachment.name || 'Arquivo em anexo'}
+                      </p>
+                      <p className="text-[10px] text-stone-400">
+                        {docAttachment.name?.toUpperCase().endsWith('.PDF') ? 'PDF' : 'Documento'} •{' '}
+                        {docAttachment.size
+                          ? `${(docAttachment.size / (1024 * 1024)).toFixed(1)} MB`
+                          : 'Arquivo salvo'}
+                      </p>
+                    </div>
                   </div>
                 )}
               </div>
-            ))}
-          </div>
-        )}
-      </div>
+            );
+          })}
 
-      {/* 4. Memórias Recentes Criadas pela IAU */}
-      <div className="space-y-3">
-        <div className="flex items-center justify-between text-xs text-stone-400 font-semibold uppercase tracking-wider">
-          <span>Memórias estruturadas pela IAU</span>
-          {memories.length > 3 && (
-            <button
-              onClick={onViewAllMemories}
-              className="text-amber-400 hover:underline flex items-center gap-1 cursor-pointer font-sans"
-            >
-              <span>Ver todas ({memories.length})</span>
-              <ArrowRight className="w-3 h-3" />
-            </button>
+          {activeRecords.length > 10 && (
+            <div className="pt-2 text-center">
+              <button
+                onClick={onViewAllRecords}
+                className="inline-flex items-center gap-1.5 text-xs text-orange-600 hover:text-orange-700 font-semibold px-4 py-2 rounded-full hover:bg-orange-50 transition-colors cursor-pointer"
+              >
+                <span>Ver todos os {activeRecords.length} registros no Arquivo</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
           )}
         </div>
-
-        {recentMemories.length === 0 ? (
-          <div className="bg-stone-900/30 border border-stone-800/60 rounded-xl p-5 text-center text-xs text-stone-500">
-            A IAU cria e organiza memórias estruturadas conforme você conversa e faz novos registros.
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {recentMemories.map((mem) => (
-              <div
-                key={mem.id}
-                className="bg-stone-900/60 border border-stone-800 rounded-xl p-3.5 flex items-start gap-3"
-              >
-                <Bookmark className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-xs font-semibold text-stone-200 truncate">
-                      {mem.title}
-                    </span>
-                    <span className="text-[10px] text-stone-500 shrink-0">
-                      {formatDate(mem.createdAt)}
-                    </span>
-                  </div>
-                  <p className="text-xs text-stone-400 mt-1 leading-relaxed">
-                    {mem.summary}
-                  </p>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+      )}
     </div>
   );
 };

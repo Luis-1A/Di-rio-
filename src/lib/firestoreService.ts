@@ -32,6 +32,40 @@ import {
 } from '../types';
 import { syncQueue, generateOperationId } from './syncQueue';
 
+/**
+ * Deeply sanitizes an object before writing to Firestore by removing any `undefined` values.
+ * Firestore throws a runtime error if any field is `undefined`.
+ */
+export function sanitizeForFirestore<T>(data: T): T {
+  if (data === null || data === undefined) {
+    return null as any;
+  }
+  if (typeof data !== 'object') {
+    return data;
+  }
+  // Check if it's a Firestore FieldValue (e.g. serverTimestamp)
+  if (
+    typeof (data as any)?._methodName === 'string' ||
+    (data as any)?.constructor?.name === 'FieldValue' ||
+    (data as any)?._delegate !== undefined
+  ) {
+    return data;
+  }
+  if (Array.isArray(data)) {
+    return data
+      .map((item) => sanitizeForFirestore(item))
+      .filter((item) => item !== undefined) as any;
+  }
+
+  const cleanObj: Record<string, any> = {};
+  for (const [key, value] of Object.entries(data as Record<string, any>)) {
+    if (value !== undefined) {
+      cleanObj[key] = sanitizeForFirestore(value);
+    }
+  }
+  return cleanObj as T;
+}
+
 export const defaultIAUSettings: IAUProfileSettings = {
   personalityTone: 'natural',
   responseLength: 'adaptive',
@@ -66,10 +100,10 @@ export async function getOrCreateUserProfile(
     updatedAt: new Date().toISOString(),
   };
 
-  await setDoc(profileRef, {
+  await setDoc(profileRef, sanitizeForFirestore({
     ...newProfile,
     _serverTimestamp: serverTimestamp(),
-  });
+  }));
 
   return newProfile;
 }
@@ -92,11 +126,11 @@ export async function saveIAUSettings(
   settings: IAUProfileSettings
 ): Promise<void> {
   const docRef = doc(db, 'users', uid, 'settings', 'iauProfile');
-  await setDoc(docRef, {
+  await setDoc(docRef, sanitizeForFirestore({
     ...settings,
     updatedAt: new Date().toISOString(),
     _serverTimestamp: serverTimestamp(),
-  });
+  }));
 }
 
 /**
@@ -154,10 +188,10 @@ export async function saveRecord(
 
   try {
     // Real save to Firestore
-    await setDoc(docRef, {
+    await setDoc(docRef, sanitizeForFirestore({
       ...fullRecord,
       _serverTimestamp: serverTimestamp(),
-    });
+    }));
     // If it was in the sync queue, mark as synced
     const pendingList = syncQueue.getPendingItems();
     const existingInQueue = pendingList.find(
@@ -186,12 +220,12 @@ export async function softDeleteRecord(uid: string, recordId: string): Promise<v
   const now = new Date().toISOString();
   await setDoc(
     docRef,
-    {
+    sanitizeForFirestore({
       isDeleted: true,
       deletedAt: now,
       updatedAt: now,
       _serverTimestamp: serverTimestamp(),
-    },
+    }),
     { merge: true }
   );
 }
@@ -201,12 +235,12 @@ export async function restoreRecord(uid: string, recordId: string): Promise<void
   const now = new Date().toISOString();
   await setDoc(
     docRef,
-    {
+    sanitizeForFirestore({
       isDeleted: false,
       deletedAt: null,
       updatedAt: now,
       _serverTimestamp: serverTimestamp(),
-    },
+    }),
     { merge: true }
   );
 }
@@ -280,10 +314,10 @@ export async function saveMemory(
   };
 
   const docRef = doc(db, 'users', uid, 'memories', memId);
-  await setDoc(docRef, {
+  await setDoc(docRef, sanitizeForFirestore({
     ...fullMemory,
     _serverTimestamp: serverTimestamp(),
-  });
+  }));
 
   return fullMemory;
 }
@@ -342,10 +376,10 @@ export async function saveMessage(
 
   const docRef = doc(db, 'users', uid, 'messages', msgId);
   try {
-    await setDoc(docRef, {
+    await setDoc(docRef, sanitizeForFirestore({
       ...fullMessage,
       _serverTimestamp: serverTimestamp(),
-    });
+    }));
     return fullMessage;
   } catch (error: any) {
     console.error('Firestore save failed for message:', error);
@@ -359,24 +393,29 @@ export async function saveMessage(
   }
 }
 
+import { uploadToStorageWithProgress } from './uploadService';
+
 /**
- * 5. Firebase Storage File Upload
+ * 5. Firebase Storage File Upload with Progress, Timeout and Diagnostic Logs
  */
 export async function uploadFileToStorage(
   uid: string,
   fileOrBlob: File | Blob,
   subfolder: 'images' | 'videos' | 'audio' | 'documents',
-  filename: string
+  filename: string,
+  onProgress?: (percent: number, phase: string) => void
 ): Promise<{ url: string; storagePath: string }> {
-  const sanitized = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
-  const uniqueName = `${Date.now()}_${sanitized}`;
-  const path = `users/${uid}/${subfolder}/${uniqueName}`;
-  const sRef = storageRef(storage, path);
-
-  const snapshot = await uploadBytes(sRef, fileOrBlob);
-  const url = await getDownloadURL(snapshot.ref);
-
-  return { url, storagePath: path };
+  const recordId = `rec_${Date.now()}`;
+  const res = await uploadToStorageWithProgress({
+    uid,
+    recordId,
+    fileOrBlob,
+    folder: subfolder,
+    fileName: filename,
+    mimeType: fileOrBlob.type || undefined,
+    onProgress,
+  });
+  return { url: res.url, storagePath: res.storagePath };
 }
 
 /**
@@ -396,21 +435,21 @@ export async function flushSyncQueue(
         const { record } = item.payload;
         if (record && record.id) {
           const docRef = doc(db, 'users', uid, 'records', record.id);
-          await setDoc(docRef, {
+          await setDoc(docRef, sanitizeForFirestore({
             ...record,
             syncStatus: 'synced',
             _serverTimestamp: serverTimestamp(),
-          });
+          }));
         }
       } else if (item.entityType === 'message') {
         const { message } = item.payload;
         if (message && message.id) {
           const docRef = doc(db, 'users', uid, 'messages', message.id);
-          await setDoc(docRef, {
+          await setDoc(docRef, sanitizeForFirestore({
             ...message,
             syncStatus: 'synced',
             _serverTimestamp: serverTimestamp(),
-          });
+          }));
         }
       }
       syncQueue.markSynced(item.id);

@@ -106,14 +106,14 @@ export default function App() {
   // Loading Screen
   if (authLoading) {
     return (
-      <div className="min-h-screen bg-stone-950 flex flex-col items-center justify-center text-stone-100 p-4">
-        <div className="w-16 h-16 rounded-2xl bg-stone-900 border border-stone-800 flex items-center justify-center text-amber-400 mb-4 shadow-xl">
+      <div className="min-h-screen bg-[#FAF8F5] flex flex-col items-center justify-center text-stone-800 p-4">
+        <div className="w-16 h-16 rounded-2xl bg-white border border-stone-200/80 flex items-center justify-center text-orange-600 mb-4 shadow-sm">
           <BookOpen className="w-8 h-8 animate-pulse" />
         </div>
-        <h2 className="text-lg font-serif font-bold text-stone-200">Diário Pessoal</h2>
+        <h2 className="text-lg font-medium text-stone-800">Diário Pessoal</h2>
         <div className="flex items-center gap-2 text-xs text-stone-500 mt-2">
-          <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-500" />
-          <span>Conectando ao Firebase...</span>
+          <Loader2 className="w-3.5 h-3.5 animate-spin text-orange-600" />
+          <span>Carregando seu espaço...</span>
         </div>
       </div>
     );
@@ -136,7 +136,7 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-stone-950 text-stone-100 flex flex-col font-sans pb-20 md:pb-6 selection:bg-amber-600/30 selection:text-amber-200">
+    <div className="min-h-screen bg-[#FAF8F5] text-stone-800 flex flex-col font-sans pb-24 md:pb-8 selection:bg-orange-100 selection:text-orange-900">
       {/* Top Header */}
       <Header
         user={currentUser}

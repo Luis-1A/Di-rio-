@@ -101,6 +101,51 @@ export async function checkGeminiHealth(): Promise<GeminiHealthResult> {
   };
 }
 
+export interface AgentRequestParams {
+  message?: string;
+  userId: string;
+  userName?: string;
+  history?: Array<{ role: string; content: string }>;
+  relevantRecords?: any[];
+  relevantMemories?: any[];
+  iauProfile?: IAUProfileSettings;
+  attachments?: any[];
+}
+
+export interface AgentResponseResult {
+  reply: string;
+  actions: any[];
+  suggestedMemories: any[];
+  timelineArtifact?: any;
+  referencedRecordIds: string[];
+  referencedMemoryIds: string[];
+}
+
+export async function executeCentralAgent(
+  params: AgentRequestParams
+): Promise<AgentResponseResult> {
+  const res = await fetch('/api/gemini/agent', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+
+  if (res.ok) {
+    const data = await res.json();
+    return {
+      reply: data.reply || 'Compreendido.',
+      actions: Array.isArray(data.actions) ? data.actions : [],
+      suggestedMemories: Array.isArray(data.suggestedMemories) ? data.suggestedMemories : [],
+      timelineArtifact: data.timelineArtifact || null,
+      referencedRecordIds: data.referencedRecordIds || [],
+      referencedMemoryIds: data.referencedMemoryIds || [],
+    };
+  } else {
+    const errData = await res.json().catch(() => ({}));
+    throw new Error(errData.error || `HTTP ${res.status}`);
+  }
+}
+
 export interface ChatRequestParams {
   message: string;
   userId: string;
@@ -220,7 +265,7 @@ ${relevantRecords.length > 0 ? JSON.stringify(relevantRecords, null, 2) : 'Nenhu
       });
 
       const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.7-flash',
         contents: formattedContents,
         config: {
           systemInstruction,
@@ -270,7 +315,7 @@ export async function transcribeAudioWithIAU(
     const cleanBase64 = base64Audio.replace(/^data:audio\/[a-zA-Z0-9_-]+;base64,/, '');
     const ai = new GoogleGenAI({ apiKey: clientKey });
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.5-transcribe',
       contents: [
         {
           role: 'user',
@@ -330,7 +375,7 @@ Sugira um JSON com suggestedTitle, suggestedCategory, suggestedTags (array de st
 Retorne APENAS um JSON válido.`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.7-flash',
       contents: prompt,
       config: {
         responseMimeType: 'application/json',

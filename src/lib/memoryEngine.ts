@@ -31,12 +31,25 @@ export function extractSearchTokens(query: string): string[] {
  * Searches and scores user records for context relevance
  */
 export function findRelevantRecords(
-  records: DiaryRecord[],
-  queryText: string,
+  recordsOrQuery: DiaryRecord[] | string,
+  queryOrRecords: string | DiaryRecord[],
   limit: number = 5
 ): DiaryRecord[] {
-  if (!records || records.length === 0) return [];
-  const activeRecords = records.filter((r) => !r.isDeleted);
+  let records: DiaryRecord[] = [];
+  let queryText = '';
+
+  if (Array.isArray(recordsOrQuery)) {
+    records = recordsOrQuery;
+    queryText = typeof queryOrRecords === 'string' ? queryOrRecords : '';
+  } else if (Array.isArray(queryOrRecords)) {
+    records = queryOrRecords;
+    queryText = typeof recordsOrQuery === 'string' ? recordsOrQuery : '';
+  } else {
+    return [];
+  }
+
+  if (!Array.isArray(records) || records.length === 0) return [];
+  const activeRecords = records.filter((r) => r && !r.isDeleted);
   const tokens = extractSearchTokens(queryText);
 
   if (tokens.length === 0) {
@@ -90,11 +103,24 @@ export function findRelevantRecords(
  * Searches and scores user memories for context relevance
  */
 export function findRelevantMemories(
-  memories: MemoryItem[],
-  queryText: string,
+  memoriesOrQuery: MemoryItem[] | string,
+  queryOrMemories: string | MemoryItem[],
   limit: number = 4
 ): MemoryItem[] {
-  if (!memories || memories.length === 0) return [];
+  let memories: MemoryItem[] = [];
+  let queryText = '';
+
+  if (Array.isArray(memoriesOrQuery)) {
+    memories = memoriesOrQuery;
+    queryText = typeof queryOrMemories === 'string' ? queryOrMemories : '';
+  } else if (Array.isArray(queryOrMemories)) {
+    memories = queryOrMemories;
+    queryText = typeof memoriesOrQuery === 'string' ? memoriesOrQuery : '';
+  } else {
+    return [];
+  }
+
+  if (!Array.isArray(memories) || memories.length === 0) return [];
   const tokens = extractSearchTokens(queryText);
 
   if (tokens.length === 0) {
@@ -104,6 +130,7 @@ export function findRelevantMemories(
   const scored: ScoredMemory[] = [];
 
   for (const mem of memories) {
+    if (!mem) continue;
     let score = 0;
     const titleNorm = (mem.title || '').toLowerCase();
     const summaryNorm = (mem.summary || '').toLowerCase();

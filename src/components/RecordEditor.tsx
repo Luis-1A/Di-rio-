@@ -1,35 +1,29 @@
 import React, { useState, useRef, useEffect } from 'react';
-import {
-  DiaryRecord,
-  RecordAttachment,
-  RecordType,
-  UserProfile,
-} from '../types';
-import {
-  saveRecord,
-  uploadFileToStorage,
-} from '../lib/firestoreService';
+import { DiaryRecord, RecordAttachment, RecordType, UserProfile } from '../types';
+import { transcribeAudioWithIAU } from '../lib/geminiBridge';
 import { AudioProcessor, AudioCaptureResult } from '../lib/audioProcessor';
-import { transcribeAudioWithIAU, organizeRecordWithIAU } from '../lib/geminiBridge';
 import {
-  Save,
-  CheckCircle2,
-  AlertCircle,
+  validateFile,
+  uploadToStorageWithProgress,
+  executeRecordCreationPipeline,
+} from '../lib/uploadService';
+import {
+  X,
+  Mic,
   Image as ImageIcon,
   Video,
-  Mic,
-  FileText,
   File,
-  Sparkles,
-  X,
+  FileText,
+  Loader2,
+  Square,
+  ChevronLeft,
+  UploadCloud,
+  CheckCircle2,
+  AlertCircle,
+  RefreshCw,
   Play,
   Pause,
-  Trash2,
-  Tag,
-  Folder,
-  Calendar as CalendarIcon,
-  ArrowLeft,
-  Loader2,
+  ExternalLink,
 } from 'lucide-react';
 
 interface RecordEditorProps {
@@ -39,7 +33,7 @@ interface RecordEditorProps {
   onCancel: () => void;
 }
 
-type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
+type FormType = 'text' | 'photo' | 'video' | 'audio' | 'document';
 
 export const RecordEditor: React.FC<RecordEditorProps> = ({
   user,
@@ -47,603 +41,788 @@ export const RecordEditor: React.FC<RecordEditorProps> = ({
   onSaved,
   onCancel,
 }) => {
+  const [selectedType, setSelectedType] = useState<FormType>(
+    initialRecord ? (initialRecord.type === 'mixed' ? 'document' : (initialRecord.type as FormType)) : 'text'
+  );
+
   const [title, setTitle] = useState(initialRecord?.title || '');
-  const [content, setContent] = useState(initialRecord?.content || '');
+  const [content, setContent] = useState(initialRecord?.content || initialRecord?.description || '');
   const [date, setDate] = useState(
     initialRecord?.date || new Date().toISOString().split('T')[0]
   );
-  const [category, setCategory] = useState(initialRecord?.category || 'Pessoal');
-  const [tags, setTags] = useState<string[]>(initialRecord?.tags || []);
-  const [tagInput, setTagInput] = useState('');
-  const [type, setType] = useState<RecordType>(initialRecord?.type || 'text');
   const [attachments, setAttachments] = useState<RecordAttachment[]>(
     initialRecord?.attachments || []
   );
 
-  const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
+  // Upload & Save Async State Machine
+  const [isSaving, setIsSaving] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadPercent, setUploadPercent] = useState<number>(0);
+  const [uploadPhaseText, setUploadPhaseText] = useState<string>('');
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  // Stored pending file for retry if needed
+  const [pendingFile, setPendingFile] = useState<File | Blob | null>(null);
+  const [pendingFileType, setPendingFileType] = useState<FormType>('text');
 
   // Audio Recording State
   const [isRecording, setIsRecording] = useState(false);
-  const [isPausedRecording, setIsPausedRecording] = useState(false);
   const [recordTimer, setRecordTimer] = useState('00:00');
-  const [isUploading, setIsUploading] = useState(false);
-  const [isOrganizing, setIsOrganizing] = useState(false);
+  const [recordSeconds, setRecordSeconds] = useState(0);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [previewAudioPlaying, setPreviewAudioPlaying] = useState(false);
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
 
   const audioProcessorRef = useRef<AudioProcessor | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const [uploadType, setUploadType] = useState<'image' | 'video' | 'audio' | 'document'>('image');
+  const isSubmittingRef = useRef(false);
 
-  // Handle Tag Addition
-  const handleAddTag = (e: React.KeyboardEvent | React.MouseEvent) => {
-    if ('key' in e && e.key !== 'Enter') return;
-    e.preventDefault();
-    const clean = tagInput.trim().replace(/^#/, '');
-    if (clean && !tags.includes(clean)) {
-      setTags([...tags, clean]);
-      setTagInput('');
-    }
-  };
-
-  const handleRemoveTag = (tagToRemove: string) => {
-    setTags(tags.filter((t) => t !== tagToRemove));
-  };
-
-  // Audio Recording Handlers with Noise Suppression
-  const handleStartAudioRecord = async () => {
-    try {
-      audioProcessorRef.current = new AudioProcessor();
-      await audioProcessorRef.current.startRecording((formatted) => {
-        setRecordTimer(formatted);
-      });
-      setIsRecording(true);
-      setIsPausedRecording(false);
-      setRecordTimer('00:00');
-    } catch (err: any) {
-      console.error('Microphone access error:', err);
-      alert('Não foi possível acessar o microfone. Verifique as permissões.');
-    }
-  };
-
-  const handlePauseAudioRecord = () => {
-    if (audioProcessorRef.current) {
-      if (isPausedRecording) {
-        audioProcessorRef.current.resume();
-        setIsPausedRecording(false);
-      } else {
-        audioProcessorRef.current.pause();
-        setIsPausedRecording(true);
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (previewAudioRef.current) {
+        previewAudioRef.current.pause();
       }
-    }
-  };
+    };
+  }, []);
 
-  const handleStopAudioRecord = async () => {
-    if (!audioProcessorRef.current) return;
-    setIsRecording(false);
-    setIsPausedRecording(false);
-    setIsUploading(true);
+  const triggerUploadFor = (type: FormType) => {
+    setSelectedType(type);
+    if (type === 'text') return;
 
-    try {
-      const result: AudioCaptureResult = await audioProcessorRef.current.stopRecording();
-      const filename = `audio_gravacao_${Date.now()}.webm`;
-
-      // 1. Upload audio to Firebase Storage
-      const { url, storagePath } = await uploadFileToStorage(
-        user.uid,
-        result.blob,
-        'audio',
-        filename
-      );
-
-      const newAttachment: RecordAttachment = {
-        id: `att_${Date.now()}`,
-        name: filename,
-        type: 'audio',
-        url,
-        storagePath,
-        size: result.blob.size,
-        mimeType: result.mimeType,
-        durationSeconds: result.durationSeconds,
-        transcriptStatus: 'processing',
-      };
-
-      setAttachments((prev) => [...prev, newAttachment]);
-      setType('audio');
-
-      // 2. Request Gemini Transcription in background with resilient bridge
-      transcribeAudioWithIAU(result.base64, result.mimeType)
-        .then((transcript) => {
-          if (transcript) {
-            setAttachments((prev) =>
-              prev.map((att) =>
-                att.id === newAttachment.id
-                  ? {
-                      ...att,
-                      transcript,
-                      transcriptStatus: 'completed',
-                    }
-                  : att
-              )
-            );
-          } else {
-            setAttachments((prev) =>
-              prev.map((att) =>
-                att.id === newAttachment.id
-                  ? { ...att, transcriptStatus: 'failed' }
-                  : att
-              )
-            );
-          }
-        })
-        .catch((err) => {
-          console.warn('Background transcription failed:', err);
-          setAttachments((prev) =>
-            prev.map((att) =>
-              att.id === newAttachment.id
-                ? { ...att, transcriptStatus: 'failed' }
-                : att
-            )
-          );
-        });
-    } catch (err: any) {
-      console.error('Audio processing/upload failed:', err);
-      alert(`Falha ao salvar áudio: ${err.message || 'Erro de upload'}`);
-    } finally {
-      setIsUploading(false);
-    }
-  };
-
-  // Generic File Upload Handler (Photos, Videos, Documents)
-  const triggerFileUpload = (targetType: 'image' | 'video' | 'audio' | 'document') => {
-    setUploadType(targetType);
     if (fileInputRef.current) {
-      if (targetType === 'image') fileInputRef.current.accept = 'image/*';
-      else if (targetType === 'video') fileInputRef.current.accept = 'video/*';
-      else if (targetType === 'audio') fileInputRef.current.accept = 'audio/*';
-      else fileInputRef.current.accept = '.pdf,.doc,.docx,.txt,.csv';
+      if (type === 'photo') fileInputRef.current.accept = 'image/*';
+      else if (type === 'video') fileInputRef.current.accept = 'video/*';
+      else if (type === 'audio') fileInputRef.current.accept = 'audio/*';
+      else fileInputRef.current.accept = '.pdf,.doc,.docx,.txt,.csv,.json,.zip';
       fileInputRef.current.click();
     }
   };
 
+  /**
+   * File Selection & Validation with Resumable Upload
+   */
   const handleFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    setIsUploading(true);
-    try {
-      const folderMap = {
-        image: 'images' as const,
-        video: 'videos' as const,
-        audio: 'audio' as const,
-        document: 'documents' as const,
-      };
+    setErrorMessage(null);
+    setSuccessMessage(null);
+    setPendingFile(file);
+    setPendingFileType(selectedType);
 
-      const { url, storagePath } = await uploadFileToStorage(
-        user.uid,
-        file,
-        folderMap[uploadType],
-        file.name
-      );
+    // Step 2: Validate file
+    const val = validateFile(file, selectedType);
+    if (!val.valid) {
+      setErrorMessage(val.error || 'Arquivo selecionado não é válido.');
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
+
+    // Auto-fill title if empty
+    if (!title.trim()) {
+      const cleanName = file.name.replace(/\.[^/.]+$/, '');
+      setTitle(cleanName);
+    }
+
+    // Step 3 & 4: Upload to Firebase Storage with live progress & timeout
+    await executeFileUpload(file, selectedType, val.fileName, val.mimeType);
+
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const executeFileUpload = async (
+    fileOrBlob: File | Blob,
+    type: FormType,
+    fileName: string,
+    mimeType: string
+  ) => {
+    setIsUploading(true);
+    setUploadPercent(0);
+    setUploadPhaseText('Iniciando envio...');
+    setErrorMessage(null);
+
+    const folderMap = {
+      photo: 'images' as const,
+      video: 'videos' as const,
+      audio: 'audio' as const,
+      document: 'documents' as const,
+      text: 'documents' as const,
+    };
+
+    const tempRecordId = initialRecord?.id || `rec_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
+    try {
+      const result = await uploadToStorageWithProgress({
+        uid: user.uid,
+        recordId: tempRecordId,
+        fileOrBlob,
+        folder: folderMap[type],
+        fileName,
+        mimeType,
+        onProgress: (pct, text) => {
+          setUploadPercent(pct);
+          setUploadPhaseText(text);
+        },
+        timeoutMs: type === 'video' ? 60000 : 45000,
+      });
 
       const newAtt: RecordAttachment = {
         id: `att_${Date.now()}`,
-        name: file.name,
-        type: uploadType,
-        url,
-        storagePath,
-        size: file.size,
-        mimeType: file.type,
+        name: result.fileName,
+        type: type === 'photo' ? 'image' : type === 'document' ? 'document' : (type as any),
+        url: result.url,
+        storagePath: result.storagePath,
+        size: result.fileSize,
+        mimeType: result.mimeType,
+        durationSeconds: type === 'audio' ? recordSeconds : undefined,
       };
 
-      setAttachments((prev) => [...prev, newAtt]);
-      if (uploadType === 'image') setType('photo');
-      else if (uploadType === 'video') setType('video');
-      else if (uploadType === 'document') setType('document');
+      setAttachments([newAtt]);
+      setPendingFile(null);
+      setUploadPercent(100);
+      setUploadPhaseText('Arquivo carregado com sucesso!');
     } catch (err: any) {
-      console.error('File upload failed:', err);
-      alert(`Falha no upload do arquivo: ${err.message || 'Erro no Firebase Storage'}`);
+      console.error('[UPLOAD ERROR] Falha no upload:', err);
+      setErrorMessage(
+        `Não foi possível salvar o arquivo. ${err.message || 'Verifique sua conexão e tente novamente.'}`
+      );
     } finally {
       setIsUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
 
-  const handleRemoveAttachment = (attId: string) => {
-    setAttachments(attachments.filter((a) => a.id !== attId));
-  };
-
-  // Smart IAU Helper to enhance title, categories and tags
-  const handleAIAssist = async () => {
-    if (!content.trim() && !title.trim()) {
-      alert('Escreva algum conteúdo no registro para a IAU analisar.');
-      return;
-    }
-
-    setIsOrganizing(true);
+  // Audio Recording Handlers
+  const handleStartAudioRecord = async () => {
     try {
-      const data = await organizeRecordWithIAU(content, title);
-      if (data.suggestedTitle && !title.trim()) {
-        setTitle(data.suggestedTitle);
+      setErrorMessage(null);
+      setRecordSeconds(0);
+      setRecordTimer('00:00');
+      audioProcessorRef.current = new AudioProcessor();
+      await audioProcessorRef.current.startRecording((formatted, secs) => {
+        setRecordTimer(formatted);
+        setRecordSeconds(secs);
+      });
+      setIsRecording(true);
+      console.log('[UPLOAD] Gravação de áudio iniciada com processamento de estúdio.');
+    } catch (err: any) {
+      console.error('[UPLOAD ERROR] Falha ao iniciar microfone:', err);
+      setErrorMessage('Não foi possível acessar o microfone. Verifique as permissões do seu navegador.');
+    }
+  };
+
+  const handleStopAudioRecord = async () => {
+    if (!audioProcessorRef.current || !isRecording) return;
+    try {
+      setIsRecording(false);
+      setUploadPhaseText('Processando áudio com redução de ruído...');
+      setIsUploading(true);
+      setUploadPercent(15);
+
+      const result: AudioCaptureResult = await audioProcessorRef.current.stopRecording();
+      const fileName = `gravacao_${Date.now()}.${result.mimeType.includes('mp4') ? 'm4a' : 'webm'}`;
+
+      setPendingFile(result.blob);
+      setPendingFileType('audio');
+
+      // 1. Upload audio to Firebase Storage
+      const folderMap = 'audio' as const;
+      const tempRecordId = initialRecord?.id || `rec_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
+      const uploadRes = await uploadToStorageWithProgress({
+        uid: user.uid,
+        recordId: tempRecordId,
+        fileOrBlob: result.blob,
+        folder: folderMap,
+        fileName,
+        mimeType: result.mimeType,
+        onProgress: (pct, text) => {
+          setUploadPercent(Math.max(15, Math.round(pct * 0.75)));
+          setUploadPhaseText(text);
+        },
+        timeoutMs: 40000,
+      });
+
+      // 2. Transcribe Audio with Gemini
+      setUploadPhaseText('Gerando transcrição inteligente com a IAU...');
+      setIsTranscribing(true);
+      let transcriptText = '';
+      try {
+        transcriptText = await transcribeAudioWithIAU(result.base64, result.mimeType);
+        console.log('[UPLOAD] Transcrição concluída:', transcriptText.substring(0, 50));
+      } catch (tErr) {
+        console.warn('[UPLOAD] Transcrição aviso:', tErr);
+      } finally {
+        setIsTranscribing(false);
       }
-      if (data.suggestedCategory) {
-        setCategory(data.suggestedCategory);
+
+      const newAtt: RecordAttachment = {
+        id: `att_${Date.now()}`,
+        name: fileName,
+        type: 'audio',
+        url: uploadRes.url,
+        storagePath: uploadRes.storagePath,
+        size: result.blob.size,
+        mimeType: result.mimeType,
+        transcript: transcriptText || undefined,
+        transcriptStatus: transcriptText ? 'completed' : undefined,
+        durationSeconds: result.durationSeconds,
+      };
+
+      setAttachments([newAtt]);
+      setPendingFile(null);
+
+      if (transcriptText && !content.trim()) {
+        setContent(transcriptText);
       }
-      if (Array.isArray(data.suggestedTags) && data.suggestedTags.length > 0) {
-        const merged = Array.from(new Set([...tags, ...data.suggestedTags]));
-        setTags(merged);
+      if (!title.trim()) {
+        setTitle('Gravação de ideias');
       }
-    } catch (e) {
-      console.warn('AI Organize failed:', e);
+
+      setUploadPercent(100);
+      setUploadPhaseText('Áudio pronto!');
+    } catch (err: any) {
+      console.error('[UPLOAD ERROR] Gravação áudio falhou:', err);
+      setErrorMessage(
+        `Não foi possível salvar o arquivo de áudio. ${err.message || 'Tente gravar novamente.'}`
+      );
     } finally {
-      setIsOrganizing(false);
+      setIsUploading(false);
     }
   };
 
-  // SAVE HANDLER with strict guarantee
-  const handleSave = async () => {
-    if (!title.trim() && !content.trim() && attachments.length === 0) {
-      setErrorMessage('O registro não pode estar totalmente vazio.');
+  const handleRetryUpload = async () => {
+    if (!pendingFile) return;
+    const isFile = pendingFile instanceof File;
+    const fName = isFile ? (pendingFile as File).name : `arquivo_${Date.now()}`;
+    const mMime = pendingFile.type || 'application/octet-stream';
+    await executeFileUpload(pendingFile, pendingFileType, fName, mMime);
+  };
+
+  const handleRemoveAttachment = () => {
+    setAttachments([]);
+    setPendingFile(null);
+    setErrorMessage(null);
+    if (previewAudioRef.current) {
+      previewAudioRef.current.pause();
+    }
+    setPreviewAudioPlaying(false);
+  };
+
+  /**
+   * Final Save Record Submission (Prevents duplicate requests)
+   */
+  const handleSave = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+
+    // Prevent duplicate simultaneous submissions
+    if (isSubmittingRef.current || isSaving || isUploading) {
+      console.warn('[UPLOAD] Envio já em andamento. Clique duplicado bloqueado.');
       return;
     }
 
-    setSaveStatus('saving');
-    setErrorMessage(null);
+    if (isRecording) {
+      await handleStopAudioRecord();
+    }
 
-    const recordType: RecordType =
-      attachments.length > 1
-        ? 'mixed'
-        : attachments.length === 1
-        ? (attachments[0].type as RecordType)
-        : 'text';
+    isSubmittingRef.current = true;
+    setIsSaving(true);
+    setErrorMessage(null);
+    setSuccessMessage(null);
 
     try {
+      let finalType: RecordType = selectedType;
+      if (attachments.length > 0) {
+        const attType = attachments[0].type;
+        if (attType === 'image') finalType = 'photo';
+        else if (attType === 'video') finalType = 'video';
+        else if (attType === 'audio') finalType = 'audio';
+        else if (attType === 'document') finalType = 'document';
+      }
+
       const now = new Date();
       const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
 
-      const saved = await saveRecord(user.uid, {
-        id: initialRecord?.id,
-        title: title.trim() || 'Registro sem título',
+      // Use the verified pipeline
+      const saved = await executeRecordCreationPipeline({
+        uid: user.uid,
+        recordId: initialRecord?.id,
+        type: finalType,
+        title: title.trim(),
         content: content.trim(),
-        date,
+        date: date || now.toISOString().split('T')[0],
         time: initialRecord?.time || timeStr,
-        category,
-        tags,
-        type: recordType,
-        attachments,
-        isFavorite: initialRecord?.isFavorite || false,
-        isDeleted: false,
-        operationId: initialRecord?.operationId || `op_rec_${Date.now()}`,
+        category: initialRecord?.category || 'geral',
+        tags: initialRecord?.tags || [],
+        existingAttachments: attachments,
+        onProgress: (pct, stage) => {
+          setUploadPercent(pct);
+          setUploadPhaseText(stage);
+        },
       });
 
-      setSaveStatus('saved');
+      setSuccessMessage('✓ Arquivo salvo');
+
+      // Smooth transition after confirmation
       setTimeout(() => {
+        isSubmittingRef.current = false;
         onSaved(saved);
       }, 700);
     } catch (err: any) {
-      console.error('Save failed:', err);
-      setSaveStatus('error');
+      isSubmittingRef.current = false;
+      console.error('[UPLOAD ERROR] Salvar registro falhou:', err);
       setErrorMessage(
-        'Não foi possível salvar no Firebase. Suas informações foram mantidas nesta tela para você tentar novamente.'
+        err.message || 'Não foi possível salvar o registro. Tente novamente.'
       );
+    } finally {
+      setIsSaving(false);
     }
   };
 
+  const togglePreviewAudio = (audioUrl: string) => {
+    if (!previewAudioRef.current) {
+      previewAudioRef.current = new Audio(audioUrl);
+      previewAudioRef.current.onended = () => setPreviewAudioPlaying(false);
+    }
+
+    if (previewAudioPlaying) {
+      previewAudioRef.current.pause();
+      setPreviewAudioPlaying(false);
+    } else {
+      previewAudioRef.current.play().catch(() => {});
+      setPreviewAudioPlaying(true);
+    }
+  };
+
+  const currentPhoto = attachments.find((a) => a.type === 'image' || a.mimeType?.startsWith('image/'));
+  const currentVideo = attachments.find((a) => a.type === 'video' || a.mimeType?.startsWith('video/'));
+  const currentAudio = attachments.find((a) => a.type === 'audio' || a.mimeType?.startsWith('audio/'));
+  const currentDoc = attachments.find((a) => a.type === 'document' || (!currentPhoto && !currentVideo && !currentAudio && a.url));
+
   return (
-    <div id="record-editor-view" className="max-w-3xl mx-auto px-4 py-6 space-y-6">
-      {/* Hidden File Input */}
+    <div id="record-editor-view" className="max-w-md mx-auto px-4 py-4 space-y-5">
+      {/* Hidden File Input with broad format support */}
       <input
-        type="file"
         ref={fileInputRef}
-        onChange={handleFileSelected}
+        type="file"
         className="hidden"
+        onChange={handleFileSelected}
       />
 
-      {/* Top Header Controls */}
-      <div className="flex items-center justify-between gap-4 border-b border-stone-800 pb-4">
+      {/* Top Nav Header */}
+      <div className="flex items-center justify-between pb-1">
         <button
           onClick={onCancel}
-          className="flex items-center gap-1.5 text-xs text-stone-400 hover:text-stone-100 transition-colors cursor-pointer"
+          className="w-9 h-9 rounded-full flex items-center justify-center text-stone-600 hover:bg-stone-100 transition-colors cursor-pointer"
         >
-          <ArrowLeft className="w-4 h-4" />
-          <span>Voltar</span>
+          <ChevronLeft className="w-5 h-5" />
         </button>
 
-        <div className="flex items-center gap-3">
-          <button
-            onClick={handleAIAssist}
-            disabled={isOrganizing || (!content.trim() && !title.trim())}
-            title="IAU sugere categoria, tags e melhorias no título"
-            className="px-3 py-1.5 rounded-xl bg-stone-900 hover:bg-stone-800 border border-stone-800 text-amber-400 text-xs font-semibold flex items-center gap-1.5 transition-colors disabled:opacity-50 cursor-pointer"
-          >
-            {isOrganizing ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            ) : (
-              <Sparkles className="w-3.5 h-3.5" />
-            )}
-            <span>Organizar com IAU</span>
-          </button>
+        <h2 className="text-sm font-semibold text-stone-800">
+          {initialRecord ? 'Editar registro' : 'Novo registro'}
+        </h2>
 
+        <button
+          onClick={onCancel}
+          className="w-9 h-9 rounded-full flex items-center justify-center text-stone-400 hover:text-stone-700 hover:bg-stone-100 transition-colors cursor-pointer"
+        >
+          <X className="w-5 h-5" />
+        </button>
+      </div>
+
+      {/* Title: O que você quer guardar? */}
+      <div className="space-y-3">
+        <h3 className="text-sm font-medium text-stone-800">O que você quer guardar?</h3>
+
+        {/* 5 Option Cards Grid */}
+        <div className="grid grid-cols-5 gap-2">
+          {/* 1. Texto */}
           <button
-            id="btn-save-record"
-            onClick={handleSave}
-            disabled={saveStatus === 'saving'}
-            className={`px-5 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all cursor-pointer shadow-lg ${
-              saveStatus === 'saved'
-                ? 'bg-emerald-600 text-stone-950 shadow-emerald-950/40'
-                : saveStatus === 'error'
-                ? 'bg-red-600 hover:bg-red-500 text-white shadow-red-950/40'
-                : 'bg-amber-600 hover:bg-amber-500 text-stone-950 shadow-amber-900/30'
+            type="button"
+            onClick={() => setSelectedType('text')}
+            className={`flex flex-col items-center justify-center py-3 px-1 rounded-2xl border transition-all cursor-pointer ${
+              selectedType === 'text'
+                ? 'bg-orange-50/90 border-orange-300 ring-2 ring-orange-500/20'
+                : 'bg-white border-stone-100 hover:bg-stone-50'
             }`}
           >
-            {saveStatus === 'saving' ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin" />
-                <span>SALVANDO...</span>
-              </>
-            ) : saveStatus === 'saved' ? (
-              <>
-                <CheckCircle2 className="w-4 h-4" />
-                <span>✓ SALVO</span>
-              </>
-            ) : saveStatus === 'error' ? (
-              <>
-                <AlertCircle className="w-4 h-4" />
-                <span>Tentar Salvar Novamente</span>
-              </>
-            ) : (
-              <>
-                <Save className="w-4 h-4" />
-                <span>Salvar</span>
-              </>
-            )}
+            <div className="w-8 h-8 rounded-xl bg-orange-50 flex items-center justify-center text-orange-600 mb-1">
+              <span className="text-base font-bold font-serif leading-none">T</span>
+            </div>
+            <span className="text-[11px] font-medium text-stone-700">Texto</span>
+          </button>
+
+          {/* 2. Foto */}
+          <button
+            type="button"
+            onClick={() => triggerUploadFor('photo')}
+            className={`flex flex-col items-center justify-center py-3 px-1 rounded-2xl border transition-all cursor-pointer ${
+              selectedType === 'photo'
+                ? 'bg-amber-50/90 border-amber-300 ring-2 ring-amber-500/20'
+                : 'bg-white border-stone-100 hover:bg-stone-50'
+            }`}
+          >
+            <div className="w-8 h-8 rounded-xl bg-amber-50 flex items-center justify-center text-amber-600 mb-1">
+              <ImageIcon className="w-4 h-4" />
+            </div>
+            <span className="text-[11px] font-medium text-stone-700">Foto</span>
+          </button>
+
+          {/* 3. Vídeo */}
+          <button
+            type="button"
+            onClick={() => triggerUploadFor('video')}
+            className={`flex flex-col items-center justify-center py-3 px-1 rounded-2xl border transition-all cursor-pointer ${
+              selectedType === 'video'
+                ? 'bg-rose-50/90 border-rose-300 ring-2 ring-rose-500/20'
+                : 'bg-white border-stone-100 hover:bg-stone-50'
+            }`}
+          >
+            <div className="w-8 h-8 rounded-xl bg-rose-50 flex items-center justify-center text-rose-500 mb-1">
+              <Video className="w-4 h-4" />
+            </div>
+            <span className="text-[11px] font-medium text-stone-700">Vídeo</span>
+          </button>
+
+          {/* 4. Áudio */}
+          <button
+            type="button"
+            onClick={() => setSelectedType('audio')}
+            className={`flex flex-col items-center justify-center py-3 px-1 rounded-2xl border transition-all cursor-pointer ${
+              selectedType === 'audio'
+                ? 'bg-emerald-50/90 border-emerald-300 ring-2 ring-emerald-500/20'
+                : 'bg-white border-stone-100 hover:bg-stone-50'
+            }`}
+          >
+            <div className="w-8 h-8 rounded-xl bg-emerald-50 flex items-center justify-center text-emerald-600 mb-1">
+              <Mic className="w-4 h-4" />
+            </div>
+            <span className="text-[11px] font-medium text-stone-700">Áudio</span>
+          </button>
+
+          {/* 5. Arquivo */}
+          <button
+            type="button"
+            onClick={() => triggerUploadFor('document')}
+            className={`flex flex-col items-center justify-center py-3 px-1 rounded-2xl border transition-all cursor-pointer ${
+              selectedType === 'document'
+                ? 'bg-blue-50/90 border-blue-300 ring-2 ring-blue-500/20'
+                : 'bg-white border-stone-100 hover:bg-stone-50'
+            }`}
+          >
+            <div className="w-8 h-8 rounded-xl bg-blue-50 flex items-center justify-center text-blue-600 mb-1">
+              <File className="w-4 h-4" />
+            </div>
+            <span className="text-[11px] font-medium text-stone-700">Arquivo</span>
           </button>
         </div>
       </div>
 
-      {/* Error notification banner if save fails */}
-      {errorMessage && (
-        <div className="p-4 rounded-xl bg-red-950/70 border border-red-800 text-red-200 text-sm flex items-start gap-3">
-          <AlertCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
-          <div className="flex-1">
-            <div className="font-semibold">⚠ NÃO FOI POSSÍVEL SALVAR</div>
-            <div className="text-xs text-red-300 mt-1">{errorMessage}</div>
+      {/* Live Upload Progress Indicator */}
+      {isUploading && (
+        <div className="bg-white border border-orange-100 rounded-3xl p-5 shadow-xs space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <Loader2 className="w-4 h-4 animate-spin text-orange-600" />
+              <span className="text-xs font-semibold text-stone-800">
+                {uploadPhaseText || 'Enviando...'}
+              </span>
+            </div>
+            <span className="text-xs font-bold font-mono text-orange-600">
+              {uploadPercent}%
+            </span>
+          </div>
+
+          {/* Real progress bar */}
+          <div className="w-full h-2 bg-stone-100 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-orange-600 transition-all duration-200 ease-out rounded-full"
+              style={{ width: `${Math.max(5, uploadPercent)}%` }}
+            />
           </div>
         </div>
       )}
 
-      {/* Form Fields */}
-      <div className="space-y-4">
-        {/* Title */}
-        <input
-          id="input-record-title"
-          type="text"
-          value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          placeholder="Título do registro..."
-          className="w-full bg-transparent text-xl sm:text-2xl font-bold font-serif text-stone-100 placeholder:text-stone-600 focus:outline-none border-b border-stone-800 focus:border-amber-500/50 pb-2 transition-colors"
-        />
+      {/* Audio Recorder Module if Audio is selected and no audio yet */}
+      {selectedType === 'audio' && !currentAudio && !isUploading && (
+        <div className="bg-white border border-stone-100 rounded-3xl p-5 space-y-3 shadow-xs text-center">
+          <p className="text-xs text-stone-500">Grave sua voz com redução de ruído ou envie um arquivo de áudio</p>
 
-        {/* Metadata Controls: Date & Category */}
-        <div className="flex flex-wrap items-center gap-3 pt-1 text-xs">
-          <div className="flex items-center gap-2 bg-stone-900 border border-stone-800 rounded-xl px-3 py-1.5 text-stone-300">
-            <CalendarIcon className="w-3.5 h-3.5 text-stone-500" />
-            <input
-              type="date"
-              value={date}
-              onChange={(e) => setDate(e.target.value)}
-              className="bg-transparent text-stone-200 focus:outline-none text-xs"
-            />
-          </div>
+          <div className="flex items-center justify-center gap-3">
+            {isRecording ? (
+              <button
+                type="button"
+                onClick={handleStopAudioRecord}
+                className="inline-flex items-center gap-2 px-4 py-2.5 bg-red-600 hover:bg-red-700 text-white text-xs font-medium rounded-full shadow-sm animate-pulse cursor-pointer"
+              >
+                <Square className="w-3.5 h-3.5 fill-current" />
+                <span>Parar ({recordTimer})</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleStartAudioRecord}
+                className="inline-flex items-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium rounded-full shadow-sm cursor-pointer"
+              >
+                <Mic className="w-3.5 h-3.5" />
+                <span>Gravar áudio agora</span>
+              </button>
+            )}
 
-          <div className="flex items-center gap-2 bg-stone-900 border border-stone-800 rounded-xl px-3 py-1.5 text-stone-300">
-            <Folder className="w-3.5 h-3.5 text-stone-500" />
-            <select
-              value={category}
-              onChange={(e) => setCategory(e.target.value)}
-              className="bg-transparent text-stone-200 focus:outline-none text-xs"
+            <button
+              type="button"
+              onClick={() => triggerUploadFor('audio')}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2.5 bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-medium rounded-full transition-colors cursor-pointer"
             >
-              <option value="Pessoal" className="bg-stone-900 text-stone-100">Pessoal</option>
-              <option value="Trabalho" className="bg-stone-900 text-stone-100">Trabalho</option>
-              <option value="Ideias" className="bg-stone-900 text-stone-100">Ideias</option>
-              <option value="Saúde" className="bg-stone-900 text-stone-100">Saúde</option>
-              <option value="Memórias" className="bg-stone-900 text-stone-100">Memórias</option>
-              <option value="Viagens" className="bg-stone-900 text-stone-100">Viagens</option>
-              <option value="Projetos" className="bg-stone-900 text-stone-100">Projetos</option>
-            </select>
+              <UploadCloud className="w-3.5 h-3.5" />
+              <span>Enviar arquivo</span>
+            </button>
           </div>
         </div>
+      )}
 
-        {/* Rich Content Textarea */}
-        <textarea
-          id="input-record-content"
-          value={content}
-          onChange={(e) => setContent(e.target.value)}
-          placeholder="Escreva seus pensamentos, acontecimentos, reflexões ou detalhes deste momento..."
-          rows={10}
-          className="w-full bg-stone-900/40 border border-stone-800/80 rounded-2xl p-4 text-stone-100 placeholder:text-stone-600 focus:outline-none focus:border-amber-500/50 text-sm leading-relaxed transition-all resize-y"
-        />
+      {/* 1. Photo Preview (Real Storage URL rendering) */}
+      {currentPhoto && (
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-stone-700">Foto salva</span>
+            <span className="text-[10px] text-stone-400">
+              {currentPhoto.size ? `${(currentPhoto.size / (1024 * 1024)).toFixed(1)} MB` : ''}
+            </span>
+          </div>
+          <div className="relative rounded-2xl overflow-hidden border border-stone-100 bg-stone-100 aspect-video max-h-48 shadow-xs">
+            <img
+              src={currentPhoto.url}
+              alt={title || 'Foto'}
+              className="w-full h-full object-cover"
+              referrerPolicy="no-referrer"
+            />
+            <button
+              type="button"
+              onClick={handleRemoveAttachment}
+              className="absolute top-2.5 right-2.5 w-7 h-7 rounded-full bg-black/60 hover:bg-black/80 text-white flex items-center justify-center transition-colors cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
 
-        {/* Media Attachments Bar */}
-        <div className="space-y-3 pt-2">
-          <div className="flex items-center justify-between text-xs font-semibold uppercase tracking-wider text-stone-400">
-            <span>Anexos e Arquivos</span>
-            {isUploading && (
-              <span className="flex items-center gap-1.5 text-amber-400 lowercase font-normal">
-                <Loader2 className="w-3 h-3 animate-spin" /> Enviando ao Firebase Storage...
-              </span>
+      {/* 2. Video Preview (Playable video with controls) */}
+      {currentVideo && (
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-stone-700">Vídeo salvo</span>
+            <span className="text-[10px] text-stone-400">
+              {currentVideo.size ? `${(currentVideo.size / (1024 * 1024)).toFixed(1)} MB` : ''}
+            </span>
+          </div>
+          <div className="relative rounded-2xl overflow-hidden border border-stone-100 bg-stone-900 aspect-video max-h-48 shadow-xs">
+            <video
+              src={currentVideo.url}
+              controls
+              className="w-full h-full object-contain"
+            />
+            <button
+              type="button"
+              onClick={handleRemoveAttachment}
+              className="absolute top-2.5 right-2.5 w-7 h-7 rounded-full bg-black/60 hover:bg-black/80 text-white flex items-center justify-center transition-colors cursor-pointer z-10"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 3. Audio Preview (With waveform player & transcript) */}
+      {currentAudio && (
+        <div className="space-y-1.5">
+          <span className="text-xs font-medium text-stone-700">Áudio gravado</span>
+          <div className="bg-white border border-stone-100 rounded-2xl p-3.5 space-y-2 shadow-xs">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <button
+                  type="button"
+                  onClick={() => togglePreviewAudio(currentAudio.url)}
+                  className="w-8 h-8 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white flex items-center justify-center shrink-0 shadow-xs cursor-pointer"
+                >
+                  {previewAudioPlaying ? (
+                    <Pause className="w-3.5 h-3.5 fill-current" />
+                  ) : (
+                    <Play className="w-3.5 h-3.5 fill-current ml-0.5" />
+                  )}
+                </button>
+                <div className="min-w-0">
+                  <p className="text-xs font-medium text-stone-800 truncate">{currentAudio.name}</p>
+                  <p className="text-[10px] text-stone-400 font-mono">
+                    {currentAudio.durationSeconds
+                      ? `${Math.floor(currentAudio.durationSeconds / 60)
+                          .toString()
+                          .padStart(2, '0')}:${(currentAudio.durationSeconds % 60)
+                          .toString()
+                          .padStart(2, '0')}`
+                      : 'Áudio gravado'}
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleRemoveAttachment}
+                className="w-7 h-7 rounded-full text-stone-400 hover:text-stone-700 hover:bg-stone-100 flex items-center justify-center cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {currentAudio.transcript && (
+              <div className="bg-stone-50 rounded-xl p-2.5 text-xs text-stone-600 leading-relaxed border border-stone-100">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-emerald-700 block mb-0.5">
+                  Transcrição IAU
+                </span>
+                {currentAudio.transcript}
+              </div>
             )}
           </div>
-
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={() => triggerFileUpload('image')}
-              className="px-3 py-2 bg-stone-900 hover:bg-stone-800 border border-stone-800 text-stone-300 rounded-xl text-xs font-medium flex items-center gap-2 transition-colors cursor-pointer"
-            >
-              <ImageIcon className="w-4 h-4 text-sky-400" />
-              <span>Foto</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => triggerFileUpload('video')}
-              className="px-3 py-2 bg-stone-900 hover:bg-stone-800 border border-stone-800 text-stone-300 rounded-xl text-xs font-medium flex items-center gap-2 transition-colors cursor-pointer"
-            >
-              <Video className="w-4 h-4 text-purple-400" />
-              <span>Vídeo</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={isRecording ? handleStopAudioRecord : handleStartAudioRecord}
-              className={`px-3.5 py-2 rounded-xl text-xs font-medium flex items-center gap-2 transition-colors cursor-pointer ${
-                isRecording
-                  ? 'bg-red-600 text-white animate-pulse'
-                  : 'bg-stone-900 hover:bg-stone-800 border border-stone-800 text-stone-300'
-              }`}
-            >
-              <Mic className={`w-4 h-4 ${isRecording ? 'text-white' : 'text-emerald-400'}`} />
-              <span>{isRecording ? '⏹ Parar Gravação' : '🎙️ Gravar Áudio'}</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => triggerFileUpload('document')}
-              className="px-3 py-2 bg-stone-900 hover:bg-stone-800 border border-stone-800 text-stone-300 rounded-xl text-xs font-medium flex items-center gap-2 transition-colors cursor-pointer"
-            >
-              <File className="w-4 h-4 text-amber-400" />
-              <span>Documento</span>
-            </button>
-          </div>
-
-          {/* Active Audio Recorder Panel */}
-          {isRecording && (
-            <div className="p-4 rounded-xl bg-stone-900 border border-red-800/60 flex items-center justify-between gap-4">
-              <div className="flex items-center gap-3">
-                <div className="w-3 h-3 rounded-full bg-red-500 animate-ping" />
-                <span className="font-mono text-lg font-bold text-stone-100">{recordTimer}</span>
-                <span className="text-xs text-stone-400 hidden sm:inline">
-                  (Filtro de ruído e compressor ativos)
-                </span>
-              </div>
-
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={handlePauseAudioRecord}
-                  className="p-2 rounded-lg bg-stone-800 text-stone-200 hover:bg-stone-700 text-xs font-medium flex items-center gap-1"
-                >
-                  {isPausedRecording ? <Play className="w-3.5 h-3.5" /> : <Pause className="w-3.5 h-3.5" />}
-                  <span>{isPausedRecording ? 'Retomar' : 'Pausar'}</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={handleStopAudioRecord}
-                  className="px-3 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white text-xs font-bold"
-                >
-                  Finalizar
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Attached Files List with Real Storage Preview and Transcription Status */}
-          {attachments.length > 0 && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
-              {attachments.map((att) => (
-                <div
-                  key={att.id}
-                  className="p-3 rounded-xl bg-stone-900/80 border border-stone-800 flex flex-col justify-between gap-2"
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex items-center gap-2 min-w-0">
-                      {att.type === 'image' && <ImageIcon className="w-4 h-4 text-sky-400 shrink-0" />}
-                      {att.type === 'video' && <Video className="w-4 h-4 text-purple-400 shrink-0" />}
-                      {att.type === 'audio' && <Mic className="w-4 h-4 text-emerald-400 shrink-0" />}
-                      {att.type === 'document' && <File className="w-4 h-4 text-amber-400 shrink-0" />}
-                      <span className="text-xs text-stone-200 font-medium truncate">{att.name}</span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => handleRemoveAttachment(att.id)}
-                      className="text-stone-500 hover:text-red-400 p-1 rounded transition-colors"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-
-                  {/* Image Preview */}
-                  {att.type === 'image' && att.url && (
-                    <img
-                      src={att.url}
-                      alt={att.name}
-                      referrerPolicy="no-referrer"
-                      className="w-full h-32 object-cover rounded-lg border border-stone-800"
-                    />
-                  )}
-
-                  {/* Audio Player and Transcription Indicator */}
-                  {att.type === 'audio' && (
-                    <div className="space-y-2">
-                      <audio src={att.url} controls className="w-full h-8" />
-                      <div className="text-[11px] flex items-center justify-between text-stone-400">
-                        <span>
-                          {att.transcriptStatus === 'processing' && (
-                            <span className="text-amber-400 flex items-center gap-1">
-                              <Loader2 className="w-3 h-3 animate-spin" /> Transcrevendo com IAU...
-                            </span>
-                          )}
-                          {att.transcriptStatus === 'completed' && (
-                            <span className="text-emerald-400">✓ Transcrição processada internamente</span>
-                          )}
-                          {att.transcriptStatus === 'failed' && (
-                            <span className="text-stone-500">Transcrição pendente</span>
-                          )}
-                        </span>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
         </div>
+      )}
 
-        {/* Tags Section */}
-        <div className="space-y-2 pt-2">
-          <label className="block text-xs font-semibold uppercase tracking-wider text-stone-400">
-            Tags de Pesquisa
-          </label>
-          <div className="flex flex-wrap items-center gap-2">
-            {tags.map((tag) => (
-              <span
-                key={tag}
-                className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-stone-900 border border-stone-800 text-amber-300 text-xs font-medium"
+      {/* 4. Document Preview */}
+      {currentDoc && (
+        <div className="space-y-1.5">
+          <span className="text-xs font-medium text-stone-700">Arquivo anexado</span>
+          <div className="bg-white border border-stone-100 rounded-2xl p-3 flex items-center justify-between shadow-xs">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="w-8 h-8 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center shrink-0">
+                <File className="w-4 h-4" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-xs font-medium text-stone-800 truncate">{currentDoc.name}</p>
+                <p className="text-[10px] text-stone-400">
+                  {currentDoc.name?.toUpperCase().endsWith('.PDF') ? 'PDF' : 'Arquivo'} •{' '}
+                  {currentDoc.size ? `${(currentDoc.size / (1024 * 1024)).toFixed(1)} MB` : 'Pronto'}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-1 shrink-0">
+              <a
+                href={currentDoc.url}
+                target="_blank"
+                rel="noreferrer"
+                className="w-7 h-7 rounded-full text-stone-400 hover:text-stone-700 hover:bg-stone-100 flex items-center justify-center"
+                title="Abrir arquivo"
               >
-                <Tag className="w-3 h-3 text-amber-500" />
-                <span>#{tag}</span>
-                <button
-                  type="button"
-                  onClick={() => handleRemoveTag(tag)}
-                  className="text-stone-500 hover:text-stone-200"
-                >
-                  <X className="w-3 h-3" />
-                </button>
-              </span>
-            ))}
-            <div className="flex items-center gap-1">
-              <input
-                type="text"
-                value={tagInput}
-                onChange={(e) => setTagInput(e.target.value)}
-                onKeyDown={handleAddTag}
-                placeholder="+ Adicionar tag (Enter)"
-                className="bg-stone-900/50 border border-stone-800 rounded-lg px-2.5 py-1 text-xs text-stone-200 placeholder:text-stone-600 focus:outline-none focus:border-amber-500/50"
-              />
+                <ExternalLink className="w-3.5 h-3.5" />
+              </a>
+              <button
+                type="button"
+                onClick={handleRemoveAttachment}
+                className="w-7 h-7 rounded-full text-stone-400 hover:text-stone-700 hover:bg-stone-100 flex items-center justify-center cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
             </div>
           </div>
         </div>
-      </div>
+      )}
+
+      {/* Error Banner with Retry Button (Guarantees no infinite hanging) */}
+      {errorMessage && (
+        <div className="bg-red-50 border border-red-200 rounded-2xl p-3.5 space-y-2 text-xs text-red-700">
+          <div className="flex items-start gap-2">
+            <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <p className="font-semibold text-red-800">Não foi possível salvar o arquivo</p>
+              <p className="mt-0.5 text-red-700">{errorMessage}</p>
+            </div>
+          </div>
+
+          {pendingFile && (
+            <div className="pt-1 flex justify-end">
+              <button
+                type="button"
+                onClick={handleRetryUpload}
+                disabled={isUploading}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-full text-xs font-semibold transition-colors cursor-pointer shadow-xs"
+              >
+                <RefreshCw className="w-3 h-3" />
+                <span>Tentar novamente</span>
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Success Notification */}
+      {successMessage && (
+        <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-3 flex items-center gap-2 text-xs text-emerald-800 font-semibold animate-fade-in">
+          <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+          <span>{successMessage}</span>
+        </div>
+      )}
+
+      {/* Form Fields */}
+      <form onSubmit={handleSave} className="space-y-4">
+        {/* Título (opcional) */}
+        <div className="space-y-1.5">
+          <label className="text-xs text-stone-500 font-normal">Título (opcional)</label>
+          <input
+            type="text"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="Ex: Passeio de fim de tarde"
+            className="w-full bg-white border border-stone-200/80 rounded-2xl px-4 py-3 text-sm text-stone-800 placeholder:text-stone-400 focus:outline-hidden focus:border-orange-500 transition-colors shadow-xs"
+          />
+        </div>
+
+        {/* Descrição (opcional) */}
+        <div className="space-y-1.5">
+          <label className="text-xs text-stone-500 font-normal">Descrição (opcional)</label>
+          <textarea
+            value={content}
+            onChange={(e) => setContent(e.target.value)}
+            placeholder="Escreva detalhes, pensamentos ou reflexões sobre este registro..."
+            rows={3}
+            className="w-full bg-white border border-stone-200/80 rounded-2xl px-4 py-3 text-sm text-stone-800 placeholder:text-stone-400 focus:outline-hidden focus:border-orange-500 transition-colors resize-none shadow-xs"
+          />
+        </div>
+
+        {/* Data */}
+        <div className="space-y-1.5">
+          <label className="text-xs text-stone-500 font-normal">Data</label>
+          <input
+            type="date"
+            value={date}
+            onChange={(e) => setDate(e.target.value)}
+            className="w-full bg-white border border-stone-200/80 rounded-2xl px-4 py-3 text-sm text-stone-800 focus:outline-hidden focus:border-orange-500 transition-colors shadow-xs"
+          />
+        </div>
+
+        {/* Botão Salvar registro (Bloqueia múltiplos cliques durante envio) */}
+        <div className="pt-2">
+          <button
+            type="submit"
+            disabled={isSaving || isUploading || isRecording}
+            className="w-full py-3.5 bg-orange-600 hover:bg-orange-700 disabled:opacity-50 text-white font-semibold text-sm rounded-2xl shadow-md shadow-orange-600/20 transition-all cursor-pointer flex items-center justify-center gap-2 active:scale-99"
+          >
+            {isSaving || isUploading ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span>{uploadPhaseText || 'Enviando...'}</span>
+              </>
+            ) : successMessage ? (
+              <>
+                <CheckCircle2 className="w-4 h-4" />
+                <span>Salvo com sucesso</span>
+              </>
+            ) : (
+              <span>Salvar registro</span>
+            )}
+          </button>
+        </div>
+      </form>
     </div>
   );
 };

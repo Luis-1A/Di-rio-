@@ -5,13 +5,12 @@ import { flushSyncQueue } from '../lib/firestoreService';
 import { logoutUser } from '../lib/authService';
 import {
   BookOpen,
-  Activity,
   LogOut,
   Sparkles,
-  Wifi,
   WifiOff,
   RefreshCw,
   Search,
+  Sliders,
 } from 'lucide-react';
 
 interface HeaderProps {
@@ -71,11 +70,11 @@ export const Header: React.FC<HeaderProps> = ({
   const pendingCount = queueItems.filter((q) => q.status === 'pending' || q.status === 'processing').length;
   const failedCount = queueItems.filter((q) => q.status === 'failed').length;
 
-  const renderSyncIndicator = () => {
+  const renderStatus = () => {
     if (!isOnline) {
       return (
-        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-stone-900 border border-stone-800 text-stone-400" title="Trabalhando offline. Alterações salvas localmente.">
-          <WifiOff className="w-3 h-3 text-amber-500" />
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-stone-100 text-stone-600 border border-stone-200">
+          <WifiOff className="w-3 h-3 text-amber-600" />
           <span>Offline</span>
         </span>
       );
@@ -83,9 +82,9 @@ export const Header: React.FC<HeaderProps> = ({
 
     if (isFlushing) {
       return (
-        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-950/80 border border-amber-800 text-amber-300">
-          <RefreshCw className="w-3 h-3 text-amber-400 animate-spin" />
-          <span>Sincronizando...</span>
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-50 text-amber-800 border border-amber-200">
+          <RefreshCw className="w-3 h-3 text-amber-600 animate-spin" />
+          <span>Sincronizando</span>
         </span>
       );
     }
@@ -94,11 +93,11 @@ export const Header: React.FC<HeaderProps> = ({
       return (
         <button
           onClick={handleManualSync}
-          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-red-950/80 border border-red-800 text-red-300 hover:bg-red-900/80 transition-colors cursor-pointer"
-          title="Clique para forçar o envio dos registros pendentes ao Firebase"
+          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-red-50 text-red-700 border border-red-200 hover:bg-red-100 transition-colors cursor-pointer"
+          title="Tocar para enviar registros pendentes"
         >
-          <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" />
-          <span>⚠ {failedCount} Pendente(s) • Tocar p/ Sincronizar</span>
+          <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
+          <span>{failedCount} pendente(s)</span>
         </button>
       );
     }
@@ -107,55 +106,50 @@ export const Header: React.FC<HeaderProps> = ({
       return (
         <button
           onClick={handleManualSync}
-          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-950/80 border border-amber-800 text-amber-300 hover:bg-amber-900/80 transition-colors cursor-pointer"
-          title="Sincronizando com Firebase"
+          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-50 text-amber-800 border border-amber-200 hover:bg-amber-100 transition-colors cursor-pointer"
         >
-          <RefreshCw className="w-3 h-3 text-amber-400 animate-spin" />
-          <span>⏳ Sincronizando</span>
+          <RefreshCw className="w-3 h-3 text-amber-600 animate-spin" />
+          <span>Sincronizando</span>
         </button>
       );
     }
 
     return (
-      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-stone-900 border border-stone-800 text-emerald-400">
-        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-        <span>✓ Sincronizado</span>
+      <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-200/80">
+        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+        <span>IA disponível</span>
       </span>
     );
   };
 
   return (
-    <header className="sticky top-0 z-30 bg-stone-950/90 backdrop-blur-md border-b border-stone-800/80 px-4 lg:px-8 py-3 transition-all">
-      <div className="max-w-7xl mx-auto flex items-center justify-between gap-4">
-        {/* Left: Brand / Title */}
+    <header className="sticky top-0 z-30 bg-[#FAF8F5]/90 backdrop-blur-md px-4 lg:px-8 py-3.5 transition-all">
+      <div className="max-w-3xl mx-auto flex items-center justify-between gap-4">
+        {/* Brand */}
         <div className="flex items-center gap-3">
           <button
             onClick={() => setActiveTab('dashboard')}
-            className="flex items-center gap-2.5 text-left group"
+            className="flex items-center gap-2.5 text-left group cursor-pointer"
           >
-            <div className="w-9 h-9 rounded-xl bg-stone-900 border border-stone-800 flex items-center justify-center text-amber-400 group-hover:border-amber-500/50 transition-colors">
-              <BookOpen className="w-5 h-5" />
+            <div className="w-8 h-8 rounded-xl bg-orange-50 border border-orange-200/60 flex items-center justify-center text-orange-600 transition-colors">
+              <BookOpen className="w-4 h-4" />
             </div>
             <div>
-              <div className="text-base font-bold font-serif text-stone-100 leading-none">
+              <div className="text-base font-semibold text-stone-800 leading-none">
                 Diário Pessoal
-              </div>
-              <div className="flex items-center gap-1.5 mt-1 text-xs text-stone-400 font-sans">
-                <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                <span>IAU Central Ativa</span>
               </div>
             </div>
           </button>
         </div>
 
         {/* Center: Desktop Navigation Tabs */}
-        <nav className="hidden md:flex items-center gap-1 bg-stone-900/90 border border-stone-800 rounded-xl p-1">
+        <nav className="hidden md:flex items-center gap-1 bg-stone-100/90 border border-stone-200/80 rounded-xl p-1">
           <button
             onClick={() => setActiveTab('dashboard')}
             className={`px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
               activeTab === 'dashboard'
-                ? 'bg-amber-600/20 text-amber-300 font-semibold shadow-sm'
-                : 'text-stone-400 hover:text-stone-200'
+                ? 'bg-white text-stone-900 font-semibold shadow-xs'
+                : 'text-stone-600 hover:text-stone-900'
             }`}
           >
             Início
@@ -164,8 +158,8 @@ export const Header: React.FC<HeaderProps> = ({
             onClick={() => setActiveTab('archive')}
             className={`px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
               activeTab === 'archive'
-                ? 'bg-amber-600/20 text-amber-300 font-semibold shadow-sm'
-                : 'text-stone-400 hover:text-stone-200'
+                ? 'bg-white text-stone-900 font-semibold shadow-xs'
+                : 'text-stone-600 hover:text-stone-900'
             }`}
           >
             Arquivo
@@ -174,8 +168,8 @@ export const Header: React.FC<HeaderProps> = ({
             onClick={() => setActiveTab('new')}
             className={`px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
               activeTab === 'new'
-                ? 'bg-amber-600 text-stone-950 font-bold shadow-md shadow-amber-900/30'
-                : 'text-amber-400 hover:text-amber-300'
+                ? 'bg-orange-600 text-white font-semibold shadow-xs'
+                : 'text-orange-700 hover:text-orange-800 font-medium'
             }`}
           >
             + Novo
@@ -184,44 +178,34 @@ export const Header: React.FC<HeaderProps> = ({
             onClick={() => setActiveTab('chat')}
             className={`px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 ${
               activeTab === 'chat'
-                ? 'bg-amber-600/20 text-amber-300 font-semibold shadow-sm'
-                : 'text-stone-400 hover:text-stone-200'
+                ? 'bg-white text-stone-900 font-semibold shadow-xs'
+                : 'text-stone-600 hover:text-stone-900'
             }`}
           >
-            <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-            <span>IAU Central</span>
+            <Sparkles className="w-3.5 h-3.5 text-orange-600" />
+            <span>IA</span>
           </button>
           <button
-            onClick={() => setActiveTab('timeline')}
+            onClick={() => setActiveTab('profile')}
             className={`px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
-              activeTab === 'timeline'
-                ? 'bg-amber-600/20 text-amber-300 font-semibold shadow-sm'
-                : 'text-stone-400 hover:text-stone-200'
+              activeTab === 'profile'
+                ? 'bg-white text-stone-900 font-semibold shadow-xs'
+                : 'text-stone-600 hover:text-stone-900'
             }`}
           >
-            Linha do Tempo
-          </button>
-          <button
-            onClick={() => setActiveTab('memories')}
-            className={`px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
-              activeTab === 'memories'
-                ? 'bg-amber-600/20 text-amber-300 font-semibold shadow-sm'
-                : 'text-stone-400 hover:text-stone-200'
-            }`}
-          >
-            Memórias
+            Ajustes
           </button>
         </nav>
 
-        {/* Right: Sync Status + Diagnostics + Profile + Logout */}
-        <div className="flex items-center gap-2.5">
-          {renderSyncIndicator()}
+        {/* Right Actions */}
+        <div className="flex items-center gap-2">
+          {renderStatus()}
 
           {onOpenSearch && (
             <button
               onClick={onOpenSearch}
               title="Pesquisar no Diário"
-              className="p-2 rounded-xl bg-stone-900 border border-stone-800 text-stone-400 hover:text-stone-200 hover:border-stone-700 transition-colors"
+              className="p-2 rounded-xl text-stone-600 hover:text-stone-900 hover:bg-stone-100 transition-colors cursor-pointer"
             >
               <Search className="w-4 h-4" />
             </button>
@@ -229,31 +213,16 @@ export const Header: React.FC<HeaderProps> = ({
 
           <button
             onClick={onOpenDiagnostics}
-            title="Diagnóstico dos Serviços"
-            className="p-2 rounded-xl bg-stone-900 border border-stone-800 text-stone-400 hover:text-amber-400 hover:border-amber-500/40 transition-colors"
+            title="Diagnóstico & Status"
+            className="p-2 rounded-xl text-stone-500 hover:text-orange-600 hover:bg-orange-50 transition-colors cursor-pointer"
           >
-            <Activity className="w-4 h-4" />
-          </button>
-
-          <button
-            onClick={() => setActiveTab('profile')}
-            title="Configurações e Perfil da IAU"
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-medium transition-colors ${
-              activeTab === 'profile'
-                ? 'bg-stone-800 border-amber-500/50 text-stone-100'
-                : 'bg-stone-900 border-stone-800 text-stone-300 hover:border-stone-700'
-            }`}
-          >
-            <div className="w-5 h-5 rounded-full bg-amber-600/30 text-amber-300 flex items-center justify-center font-bold text-[10px]">
-              {(user.displayName || 'U')[0].toUpperCase()}
-            </div>
-            <span className="hidden sm:inline truncate max-w-[100px]">{user.displayName || 'Usuário'}</span>
+            <Sliders className="w-4 h-4" />
           </button>
 
           <button
             onClick={() => logoutUser()}
-            title="Encerrar sessão"
-            className="p-2 rounded-xl bg-stone-900 border border-stone-800 text-stone-400 hover:text-red-400 hover:border-red-900/50 transition-colors"
+            title="Sair da conta"
+            className="p-2 rounded-xl text-stone-400 hover:text-red-600 hover:bg-red-50 transition-colors cursor-pointer"
           >
             <LogOut className="w-4 h-4" />
           </button>

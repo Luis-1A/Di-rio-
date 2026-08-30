@@ -23,6 +23,11 @@ export interface IAUProfileSettings {
   selectedVoiceName?: string;
   allowAutoMemoryCreation: boolean;
   customInstructions?: string;
+  // Host Personality Mirroring
+  mirrorHostPersonality?: boolean;
+  hostNickName?: string;
+  hostPersonaTraits?: string; // e.g. "curioso, focado em tecnologia, fala mansa e direta, gosta de poesia e café"
+  hostIntimacyLevel?: 'companion' | 'respectful' | 'intimate_mirror';
 }
 
 export type RecordType = 'text' | 'photo' | 'video' | 'audio' | 'document' | 'mixed';
@@ -44,6 +49,7 @@ export interface DiaryRecord {
   id: string;
   userId: string;
   title: string;
+  description?: string;
   date: string; // YYYY-MM-DD
   time: string; // HH:mm
   content: string;
@@ -51,6 +57,12 @@ export interface DiaryRecord {
   tags: string[];
   category: string;
   attachments: RecordAttachment[];
+  storagePath?: string;
+  downloadUrl?: string;
+  mimeType?: string;
+  fileName?: string;
+  fileSize?: number;
+  uploadStatus?: 'completed' | 'pending' | 'failed';
   isFavorite: boolean;
   isDeleted: boolean;
   deletedAt?: string;
@@ -75,6 +87,29 @@ export interface MemoryItem {
   updatedAt: string;
 }
 
+export interface TimelineArtifactItem {
+  date: string;
+  title: string;
+  summary: string;
+  type: RecordType;
+  recordId?: string;
+}
+
+export interface TimelineArtifact {
+  title: string;
+  period: string;
+  items: TimelineArtifactItem[];
+}
+
+export interface AgentAction {
+  id: string;
+  tool: 'create_record' | 'update_record' | 'delete_record_request' | 'create_timeline' | 'save_memory' | 'create_document' | 'search_records';
+  status: 'executed' | 'pending_confirmation' | 'rejected' | 'failed';
+  summary: string;
+  payload: any;
+  result?: any;
+}
+
 export interface ChatMessage {
   id: string;
   userId: string;
@@ -87,6 +122,15 @@ export interface ChatMessage {
   referencedRecordIds?: string[];
   referencedMemoryIds?: string[];
   generatedMemoryIds?: string[];
+  agentActions?: AgentAction[];
+  timelineArtifact?: TimelineArtifact;
+  pendingDestructiveAction?: {
+    actionType: 'delete_record';
+    recordId: string;
+    recordTitle: string;
+    reason: string;
+  };
+  attachments?: RecordAttachment[];
   syncStatus: 'synced' | 'pending' | 'failed';
   operationId: string;
 }

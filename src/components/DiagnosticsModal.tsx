@@ -4,11 +4,7 @@ import { auth, db, storage } from '../lib/firebase';
 import { syncQueue } from '../lib/syncQueue';
 import { flushSyncQueue } from '../lib/firestoreService';
 import { getStoredSession } from '../lib/authService';
-import {
-  checkGeminiHealth,
-  getCustomGeminiKey,
-  saveCustomGeminiKey,
-} from '../lib/geminiBridge';
+import { checkGeminiHealth } from '../lib/geminiBridge';
 import {
   CheckCircle,
   AlertTriangle,
@@ -16,12 +12,11 @@ import {
   RefreshCw,
   X,
   Activity,
-  Key,
   Globe,
-  Check,
   HelpCircle,
   Trash2,
   Send,
+  Sparkles,
 } from 'lucide-react';
 
 interface DiagnosticsModalProps {
@@ -41,9 +36,6 @@ export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({ isOpen, onCl
   });
   const [geminiStatusNote, setGeminiStatusNote] = useState<string>('');
   const [checking, setChecking] = useState(false);
-  const [showKeyInput, setShowKeyInput] = useState(false);
-  const [customKey, setCustomKey] = useState(getCustomGeminiKey());
-  const [saveKeySuccess, setSaveKeySuccess] = useState(false);
   const [flushingQueue, setFlushingQueue] = useState(false);
   const [flushResultNote, setFlushResultNote] = useState<string | null>(null);
 
@@ -94,7 +86,7 @@ export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({ isOpen, onCl
       setGeminiStatusNote(geminiRes.message);
     } catch {
       newHealth.gemini = 'error';
-      setGeminiStatusNote('Erro ao testar comunicação com a IAU Central.');
+      setGeminiStatusNote('Erro ao testar comunicação com a IA Central.');
     }
 
     // 5. Check Audio Engine
@@ -118,17 +110,9 @@ export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({ isOpen, onCl
 
   useEffect(() => {
     if (isOpen) {
-      setCustomKey(getCustomGeminiKey());
       runDiagnostics();
     }
   }, [isOpen]);
-
-  const handleSaveCustomKey = () => {
-    saveCustomGeminiKey(customKey);
-    setSaveKeySuccess(true);
-    setTimeout(() => setSaveKeySuccess(false), 2000);
-    runDiagnostics();
-  };
 
   const handleForceFlushQueue = async () => {
     const storedUser = getStoredSession();
@@ -162,23 +146,23 @@ export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({ isOpen, onCl
     switch (status) {
       case 'online':
         return (
-          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-950/80 text-emerald-300 border border-emerald-800">
-            <CheckCircle className="w-3.5 h-3.5 text-emerald-400" />
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">
+            <CheckCircle className="w-3.5 h-3.5 text-emerald-600" />
             ONLINE
           </span>
         );
       case 'degraded':
         return (
-          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-950/80 text-amber-300 border border-amber-800">
-            <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
-            DEGRADADO
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-50 text-amber-800 border border-amber-200">
+            <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
+            PARCIAL
           </span>
         );
       case 'error':
       case 'offline':
         return (
-          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-red-950/80 text-red-300 border border-red-800">
-            <XCircle className="w-3.5 h-3.5 text-red-400" />
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-red-50 text-red-700 border border-red-200">
+            <XCircle className="w-3.5 h-3.5 text-red-600" />
             OFFLINE
           </span>
         );
@@ -186,124 +170,87 @@ export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({ isOpen, onCl
   };
 
   return (
-    <div id="diagnostics-modal" className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-950/80 backdrop-blur-sm">
-      <div className="bg-stone-900 border border-stone-800 rounded-2xl w-full max-w-lg p-6 shadow-2xl relative max-h-[90vh] overflow-y-auto">
-        <div className="flex items-center justify-between border-b border-stone-800 pb-4 mb-5">
+    <div id="diagnostics-modal" className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-900/40 backdrop-blur-xs">
+      <div className="bg-white border border-stone-200 rounded-2xl w-full max-w-lg p-6 shadow-xl relative max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between border-b border-stone-100 pb-4 mb-5">
           <div className="flex items-center gap-2.5">
-            <Activity className="w-5 h-5 text-amber-400" />
+            <Activity className="w-5 h-5 text-amber-600" />
             <div>
-              <h2 className="text-lg font-bold text-stone-100">Diagnóstico do Sistema</h2>
+              <h2 className="text-lg font-serif font-semibold text-stone-800">Status dos Serviços</h2>
               <div className="flex items-center gap-1.5 text-xs text-stone-400">
-                <Globe className="w-3 h-3 text-stone-500" />
+                <Globe className="w-3 h-3 text-stone-400" />
                 <span>{hostname || 'localhost'}</span>
               </div>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="text-stone-400 hover:text-stone-100 p-1.5 rounded-lg hover:bg-stone-800 transition-colors"
+            className="text-stone-400 hover:text-stone-700 p-1.5 rounded-lg hover:bg-stone-50 transition-colors cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
         <div className="space-y-3 mb-6">
-          <div className="flex items-center justify-between p-3 rounded-xl bg-stone-950 border border-stone-800">
+          <div className="flex items-center justify-between p-3 rounded-xl bg-stone-50 border border-stone-200/80">
             <div>
-              <div className="text-sm font-medium text-stone-200">Firebase Authentication</div>
-              <div className="text-xs text-stone-500">Sessão e isolamento por UID</div>
+              <div className="text-sm font-medium text-stone-800">Autenticação</div>
+              <div className="text-xs text-stone-500">Sessão e isolamento de usuário</div>
             </div>
             {renderStatusBadge(health.auth)}
           </div>
 
-          <div className="flex items-center justify-between p-3 rounded-xl bg-stone-950 border border-stone-800">
+          <div className="flex items-center justify-between p-3 rounded-xl bg-stone-50 border border-stone-200/80">
             <div>
-              <div className="text-sm font-medium text-stone-200">Cloud Firestore</div>
-              <div className="text-xs text-stone-500">Banco oficial e persistência em tempo real</div>
+              <div className="text-sm font-medium text-stone-800">Banco de Dados (Firestore)</div>
+              <div className="text-xs text-stone-500">Armazenamento em nuvem em tempo real</div>
             </div>
             {renderStatusBadge(health.firestore)}
           </div>
 
-          <div className="flex items-center justify-between p-3 rounded-xl bg-stone-950 border border-stone-800">
+          <div className="flex items-center justify-between p-3 rounded-xl bg-stone-50 border border-stone-200/80">
             <div>
-              <div className="text-sm font-medium text-stone-200">Firebase Storage</div>
-              <div className="text-xs text-stone-500">Armazenamento de fotos, áudios e vídeos</div>
+              <div className="text-sm font-medium text-stone-800">Armazenamento de Arquivos</div>
+              <div className="text-xs text-stone-500">Fotos, vídeos, áudios e documentos</div>
             </div>
             {renderStatusBadge(health.storage)}
           </div>
 
-          <div className="p-3 rounded-xl bg-stone-950 border border-stone-800 space-y-2">
+          <div className="p-3 rounded-xl bg-stone-50 border border-stone-200/80 space-y-2">
             <div className="flex items-center justify-between">
-              <div>
-                <div className="text-sm font-medium text-stone-200">IAU Central (Gemini)</div>
-                <div className="text-xs text-stone-500">Cérebro, transcrição e memórias</div>
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-4 h-4 text-amber-600" />
+                <div>
+                  <div className="text-sm font-medium text-stone-800">IA Central (Cérebro Operacional)</div>
+                  <div className="text-xs text-stone-500">Compreensão multimodal, ações & ferramentas</div>
+                </div>
               </div>
               {renderStatusBadge(health.gemini)}
             </div>
 
             {geminiStatusNote && (
-              <div className="text-xs text-stone-400 pt-1 border-t border-stone-900 flex items-start gap-1.5">
-                <HelpCircle className="w-3.5 h-3.5 text-stone-500 shrink-0 mt-0.5" />
+              <div className="text-xs text-stone-500 pt-1 border-t border-stone-200/60 flex items-start gap-1.5">
+                <HelpCircle className="w-3.5 h-3.5 text-stone-400 shrink-0 mt-0.5" />
                 <span>{geminiStatusNote}</span>
               </div>
             )}
-
-            {/* Quick Gemini Key Configuration Toggle */}
-            <div className="pt-2">
-              <button
-                type="button"
-                onClick={() => setShowKeyInput(!showKeyInput)}
-                className="text-xs text-amber-400 hover:text-amber-300 underline flex items-center gap-1 cursor-pointer"
-              >
-                <Key className="w-3 h-3" />
-                <span>{showKeyInput ? 'Ocultar chave Gemini' : 'Configurar Chave Gemini do Diário'}</span>
-              </button>
-
-              {showKeyInput && (
-                <div className="mt-2.5 p-3 rounded-xl bg-stone-900 border border-stone-800 space-y-2">
-                  <label className="block text-xs text-stone-300 font-medium">
-                    Chave Gemini API (Google AI Studio):
-                  </label>
-                  <div className="flex gap-2">
-                    <input
-                      type="password"
-                      value={customKey}
-                      onChange={(e) => setCustomKey(e.target.value)}
-                      placeholder="AIzaSy..."
-                      className="flex-1 bg-stone-950 border border-stone-700 rounded-lg px-3 py-1.5 text-xs text-stone-100 placeholder:text-stone-600 focus:outline-none focus:border-amber-500"
-                    />
-                    <button
-                      type="button"
-                      onClick={handleSaveCustomKey}
-                      className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-stone-950 font-bold rounded-lg text-xs flex items-center gap-1 transition-colors cursor-pointer"
-                    >
-                      {saveKeySuccess ? <Check className="w-3.5 h-3.5" /> : null}
-                      <span>Salvar</span>
-                    </button>
-                  </div>
-                  <p className="text-[11px] text-stone-500 leading-relaxed">
-                    Em hospedagens como Vercel, a chave pode ser definida no painel como <code>GEMINI_API_KEY</code> ou salva diretamente aqui no navegador para ativação imediata.
-                  </p>
-                </div>
-              )}
-            </div>
           </div>
 
-          <div className="flex items-center justify-between p-3 rounded-xl bg-stone-950 border border-stone-800">
+          <div className="flex items-center justify-between p-3 rounded-xl bg-stone-50 border border-stone-200/80">
             <div>
-              <div className="text-sm font-medium text-stone-200">Motor de Áudio & Filtro</div>
-              <div className="text-xs text-stone-500">Captura com cancelamento de ruído e TTS</div>
+              <div className="text-sm font-medium text-stone-800">Sistema de Áudio & Voz</div>
+              <div className="text-xs text-stone-500">Gravação por microfone e sintetizador de voz com watchdog</div>
             </div>
             {renderStatusBadge(health.audioEngine)}
           </div>
 
           {/* Sync Queue Card with Flush & Clear actions */}
-          <div className="p-3 rounded-xl bg-stone-950 border border-stone-800 space-y-3">
+          <div className="p-3 rounded-xl bg-stone-50 border border-stone-200/80 space-y-3">
             <div className="flex items-center justify-between">
               <div>
-                <div className="text-sm font-medium text-stone-200">Fila de Sincronização</div>
+                <div className="text-sm font-medium text-stone-800">Fila de Sincronização</div>
                 <div className="text-xs text-stone-500">
-                  {syncQueue.getPendingItems().length} item(ns) pendente(s) de envio ao Firestore
+                  {syncQueue.getPendingItems().length} item(ns) pendente(s) de envio
                 </div>
               </div>
               {renderStatusBadge(health.syncQueue)}
@@ -314,17 +261,17 @@ export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({ isOpen, onCl
                 type="button"
                 onClick={handleForceFlushQueue}
                 disabled={flushingQueue || syncQueue.getPendingItems().length === 0}
-                className="px-3 py-1.5 bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 border border-amber-500/30 rounded-lg text-xs font-semibold flex items-center gap-1.5 disabled:opacity-40 transition-colors cursor-pointer"
+                className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-medium flex items-center gap-1.5 disabled:opacity-40 transition-colors cursor-pointer shadow-xs"
               >
                 <Send className="w-3 h-3" />
-                <span>{flushingQueue ? 'Enviando...' : 'Forçar Envio ao Firebase'}</span>
+                <span>{flushingQueue ? 'Enviando...' : 'Sincronizar Agora'}</span>
               </button>
 
               {syncQueue.getPendingItems().length > 0 && (
                 <button
                   type="button"
                   onClick={handleClearQueue}
-                  className="px-3 py-1.5 bg-stone-800 hover:bg-red-950/60 text-stone-400 hover:text-red-300 border border-stone-700 hover:border-red-800 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer"
+                  className="px-3 py-1.5 bg-stone-100 hover:bg-red-50 text-stone-600 hover:text-red-700 border border-stone-200 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer"
                 >
                   <Trash2 className="w-3 h-3" />
                   <span>Limpar Fila</span>
@@ -333,26 +280,25 @@ export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({ isOpen, onCl
             </div>
 
             {flushResultNote && (
-              <div className="text-xs text-amber-400 bg-amber-950/40 p-2 rounded-lg border border-amber-800/60">
+              <div className="text-xs text-amber-900 bg-amber-50 p-2 rounded-lg border border-amber-200">
                 {flushResultNote}
               </div>
             )}
           </div>
         </div>
 
-        <div className="flex items-center justify-between pt-4 border-t border-stone-800">
-          <span className="text-xs text-stone-500">Última checagem: {health.lastChecked}</span>
+        <div className="flex items-center justify-between pt-4 border-t border-stone-100">
+          <span className="text-xs text-stone-400">Última checagem: {health.lastChecked}</span>
           <button
             onClick={runDiagnostics}
             disabled={checking}
-            className="px-4 py-2 bg-stone-800 hover:bg-stone-700 disabled:opacity-50 text-stone-200 rounded-xl text-xs font-semibold flex items-center gap-2 transition-colors cursor-pointer"
+            className="px-4 py-2 bg-stone-100 hover:bg-stone-200 disabled:opacity-50 text-stone-700 rounded-xl text-xs font-medium flex items-center gap-2 transition-colors cursor-pointer"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${checking ? 'animate-spin' : ''}`} />
-            <span>Verificar Agora</span>
+            <span>Atualizar</span>
           </button>
         </div>
       </div>
     </div>
   );
 };
-
