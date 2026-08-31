@@ -103,7 +103,7 @@ ${relevantRecords.length > 0 ? JSON.stringify(relevantRecords, null, 2) : 'Nenhu
     });
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.7-flash',
       contents: formattedContents,
       config: {
         systemInstruction,

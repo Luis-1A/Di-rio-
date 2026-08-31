@@ -218,8 +218,14 @@ export async function streamCentralAgent(
         };
       }
     } else {
-      const errData = await res.json().catch(() => ({}));
-      serverError = errData.error || `HTTP ${res.status}`;
+      const contentType = res.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        const errData = await res.json().catch(() => ({}));
+        serverError = errData.error || `HTTP ${res.status}`;
+      } else {
+        const rawErr = await res.text().catch(() => '');
+        serverError = `Erro HTTP ${res.status}: ${rawErr.slice(0, 100)}`;
+      }
     }
   } catch (streamErr: any) {
     if (streamErr.name === 'AbortError' || streamErr.message === 'TIMEOUT_EXCEEDED') {
@@ -236,15 +242,92 @@ export async function streamCentralAgent(
     try {
       const ai = new GoogleGenAI({ apiKey: clientKey });
       const hostNickName = params.iauProfile?.hostNickName || params.userName || 'amigo';
+      const personalityTone = params.iauProfile?.personalityTone || 'natural';
+      const responseLength = params.iauProfile?.responseLength || 'adaptive';
+      const customInstructions = params.iauProfile?.customInstructions || '';
+      const hostTraits = params.iauProfile?.hostPersonaTraits || '';
+      const hostIntimacy = params.iauProfile?.hostIntimacyLevel || 'companion';
 
-      const prompt = `Você é a IAU (Inteligência Artificial Universal), no Diário Pessoal de ${hostNickName}.
-Mensagem: "${params.message || 'Olá'}"
-Responda de forma autêntica, viva e acolhedora em Markdown.`;
+      const lengthGuidance = {
+        short: 'Seja conciso, direto ao ponto e objetivo (1 a 3 parágrafos curtos).',
+        medium: 'Dê respostas equilibradas, bem organizadas e claras.',
+        long: 'Forneça respostas completas, aprofundadas e detalhadas com riqueza de contexto.',
+        adaptive: 'Adapte a extensão da resposta naturalmente de acordo com o pedido do usuário.',
+      }[responseLength as string] || 'Adapte a extensão conforme o contexto.';
+
+      const toneGuidance = {
+        natural: 'Tom natural, espontâneo, autêntico e caloroso.',
+        thoughtful: 'Tom reflexivo, profundo, cuidadoso e filosófico.',
+        witty: 'Tom bem-humorado, perspicaz e leve.',
+        direct: 'Tom objetivo, prático, resolutivo e sem rodeios.',
+        empathetic: 'Tom acolhedor, empático, sensível e atencioso.',
+      }[personalityTone as string] || 'Tom natural e conectado.';
+
+      const intimacyGuidance = {
+        companion: 'Companheiro dedicado: intimidade leal, escuta ativa e cumplicidade.',
+        respectful: 'Respeitoso e cordial: preserva um tom mais polido e sóbrio.',
+        intimate_mirror: 'Espelho íntimo: sincronia total com o vocabulário, gírias e modo de pensar do hospedeiro.',
+      }[hostIntimacy as string] || 'Companheiro dedicado.';
+
+      const systemInstruction = `
+Você é a IAU (Inteligência Artificial Universal), a mente central, conselheira e companheira de vida no Diário Pessoal de ${hostNickName} (UID: ${params.userId}).
+Data e hora atual de referência: 30 de Agosto de 2026.
+
+DIRETRIZES DA IAU:
+- Sua personalidade é calorosa, amigável, autêntica, viva e acolhedora.
+- Para saudações cotidianas ("Oi", "Olá", "Tudo bem?", etc.), responda com entusiasmo, leveza e simpatia imediata.
+- Se o usuário desabafar ou trouxer reflexões, ouça com carinho e sabedoria.
+- Nível de proximidade: ${intimacyGuidance}
+- Tom: ${toneGuidance}
+- Extensão: ${lengthGuidance}
+- Traços do hospedeiro: ${hostTraits || 'Autêntico e reflexivo'}.
+${customInstructions ? `Instruções personalizadas: ${customInstructions}` : ''}
+
+CONTEXTO DE MEMÓRIAS DO USUÁRIO:
+${params.relevantMemories && params.relevantMemories.length > 0 ? JSON.stringify(params.relevantMemories, null, 2) : 'Nenhuma memória pregressa.'}
+
+CONTEXTO DE REGISTROS DO DIÁRIO:
+${params.relevantRecords && params.relevantRecords.length > 0 ? JSON.stringify(params.relevantRecords, null, 2) : 'Nenhum registro específico.'}
+
+Responda em Markdown limpo e acolhedor.`;
+
+      const formattedContents: any[] = [];
+      const recentHistory = Array.isArray(params.history) ? params.history.slice(-8) : [];
+      for (const msg of recentHistory) {
+        formattedContents.push({
+          role: msg.role === 'assistant' ? 'model' : 'user',
+          parts: [{ text: msg.content }],
+        });
+      }
+
+      const userParts: any[] = [];
+      if (params.attachments && params.attachments.length > 0) {
+        for (const att of params.attachments) {
+          if (att.url && att.url.startsWith('data:') && att.mimeType?.startsWith('image/')) {
+            const clean = att.url.replace(/^data:image\/[a-zA-Z0-9_-]+;base64,/, '');
+            userParts.push({
+              inlineData: {
+                mimeType: att.mimeType,
+                data: clean,
+              },
+            });
+          }
+        }
+      }
+      if (params.message) {
+        userParts.push({ text: params.message });
+      }
+
+      formattedContents.push({
+        role: 'user',
+        parts: userParts,
+      });
 
       const responseStream = await ai.models.generateContentStream({
         model: 'gemini-3.7-flash',
-        contents: prompt,
+        contents: formattedContents,
         config: {
+          systemInstruction,
           temperature: 0.7,
         },
       });
@@ -278,10 +361,11 @@ Responda de forma autêntica, viva e acolhedora em Markdown.`;
   clearTimeout(timeoutId);
   if (signal) signal.removeEventListener('abort', abortListener);
 
-  throw new Error(
-    serverError ||
-      'Não foi possível conectar ao Gemini. Verifique a chave GEMINI_API_KEY ou sua conexão.'
-  );
+  const friendlyError = serverError?.includes('404')
+    ? 'O servidor da IA não foi localizado nesta rota (/api/gemini/stream). Configure GEMINI_API_KEY no ambiente ou insira sua chave em Ajustes.'
+    : serverError || 'Não foi possível conectar ao Gemini. Verifique a chave GEMINI_API_KEY ou sua conexão de internet.';
+
+  throw new Error(friendlyError);
 }
 
 export async function executeCentralAgent(
@@ -564,7 +648,7 @@ export async function transcribeAudioWithIAU(
     const cleanBase64 = base64Audio.replace(/^data:audio\/[a-zA-Z0-9_-]+;base64,/, '');
     const ai = new GoogleGenAI({ apiKey: clientKey });
     const response = await ai.models.generateContent({
-      model: 'gemini-3.5-transcribe',
+      model: 'gemini-3.7-flash',
       contents: [
         {
           role: 'user',

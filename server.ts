@@ -173,12 +173,15 @@ async function generateWithFallback(
 async function startServer() {
   const app = express();
 
-  // Middleware for JSON parsing with 50MB limit for audio/image payloads
+  // Global middleware
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
+  // Dedicated API Router for all server-side endpoints
+  const apiRouter = express.Router();
+
   // API Health Check
-  app.get('/api/health', (req, res) => {
+  apiRouter.get('/health', (req, res) => {
     const hasGeminiKey = !!process.env.GEMINI_API_KEY;
     res.json({
       status: 'ok',
@@ -188,7 +191,7 @@ async function startServer() {
   });
 
   // API: Real-Time Streaming IAU Chat (Zero latency, live progressive tokens)
-  app.post('/api/gemini/stream', async (req, res) => {
+  apiRouter.post('/gemini/stream', async (req, res) => {
     // Set headers for Server-Sent Events (SSE)
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -381,7 +384,7 @@ Responda em Markdown limpo, sem atrasos e sem formatações artificiais desneces
   });
 
   // API: Gemini Central Agent (Brain of the Personal Diary)
-  app.post('/api/gemini/agent', async (req, res) => {
+  apiRouter.post('/gemini/agent', async (req, res) => {
     try {
       const ai = getGeminiClient();
       if (!ai) {
@@ -408,7 +411,6 @@ Responda em Markdown limpo, sem atrasos e sem formatações artificiais desneces
       const personalityTone = iauProfile.personalityTone || 'natural';
       const responseLength = iauProfile.responseLength || 'adaptive';
       const customInstructions = iauProfile.customInstructions || '';
-      const mirrorHost = iauProfile.mirrorHostPersonality !== false;
       const hostNickName = iauProfile.hostNickName || userName || 'Usuário';
       const hostTraits = iauProfile.hostPersonaTraits || '';
       const hostIntimacy = iauProfile.hostIntimacyLevel || 'companion';
@@ -434,7 +436,6 @@ Responda em Markdown limpo, sem atrasos e sem formatações artificiais desneces
         intimate_mirror: 'Espelho íntimo: sincronia total com o vocabulário, gírias e modo de pensar do hospedeiro.',
       }[hostIntimacy as string] || 'Companheiro dedicado.';
 
-      const currentDateStr = '2026-08-30';
       const currentTimeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' });
 
       const cleanMemories = sanitizeMemoriesForPrompt(relevantMemories);
@@ -539,7 +540,7 @@ ${attachments.length > 0 ? JSON.stringify(attachments.map((a: any) => ({ name: a
   });
 
   // API: Gemini Chat with IAU Central context and Layered Memory
-  app.post('/api/gemini/chat', async (req, res) => {
+  apiRouter.post('/gemini/chat', async (req, res) => {
     try {
       const ai = getGeminiClient();
       if (!ai) {
@@ -565,7 +566,6 @@ ${attachments.length > 0 ? JSON.stringify(attachments.map((a: any) => ({ name: a
       const personalityTone = iauProfile.personalityTone || 'natural';
       const responseLength = iauProfile.responseLength || 'adaptive';
       const customInstructions = iauProfile.customInstructions || '';
-      const mirrorHost = iauProfile.mirrorHostPersonality !== false;
       const hostNickName = iauProfile.hostNickName || userName || 'Usuário';
       const hostTraits = iauProfile.hostPersonaTraits || '';
 
@@ -678,7 +678,7 @@ Retorne APENAS um array JSON válido.`;
   });
 
   // API: Audio Transcription via Gemini Multimodal Audio
-  app.post('/api/gemini/transcribe', async (req, res) => {
+  apiRouter.post('/gemini/transcribe', async (req, res) => {
     try {
       const ai = getGeminiClient();
       if (!ai) {
@@ -696,7 +696,7 @@ Retorne APENAS um array JSON válido.`;
       const cleanBase64 = base64Audio.replace(/^data:audio\/[a-zA-Z0-9_-]+;base64,/, '');
 
       const response = await generateWithFallback(ai, {
-        preferredModel: 'gemini-3.5-transcribe',
+        preferredModel: 'gemini-3.7-flash',
         contents: [
           {
             role: 'user',
@@ -727,7 +727,7 @@ Retorne APENAS um array JSON válido.`;
   });
 
   // API: Smart search / summary assistant for Records and Memories
-  app.post('/api/gemini/organize-record', async (req, res) => {
+  apiRouter.post('/gemini/organize-record', async (req, res) => {
     try {
       const ai = getGeminiClient();
       if (!ai) {
@@ -773,16 +773,30 @@ Retorne APENAS um JSON no formato:
     }
   });
 
-  // Strict API 404 handler - prevents ANY /api/* request from hitting the Vite SPA index.html fallback
-  app.all('/api/*', (req, res) => {
-    console.warn(`[SERVER 404] API route not found: ${req.method} ${req.originalUrl}`);
+  // Strict API 404 handler inside apiRouter - guarantees any unhandled /api/* returns JSON, never HTML
+  apiRouter.use((req, res) => {
+    console.warn(`[SERVER 404] API route not found: ${req.method} /api${req.url}`);
     res.status(404).json({
-      error: `Endpoint de API não encontrado: ${req.method} ${req.originalUrl}`,
+      error: `Endpoint de API não encontrado: ${req.method} /api${req.url}`,
       status: 404,
     });
   });
 
-  // Vite middleware setup
+  // API Error handler inside apiRouter
+  apiRouter.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    console.error('[API INTERNAL ERROR]', err);
+    if (!res.headersSent) {
+      res.status(err?.status || 500).json({
+        error: err?.message || 'Erro interno no servidor de API.',
+        status: err?.status || 500,
+      });
+    }
+  });
+
+  // Mount API router FIRST before any Vite or static asset middlewares
+  app.use('/api', apiRouter);
+
+  // Vite middleware setup (development) / Static files (production)
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
