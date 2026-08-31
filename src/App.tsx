@@ -193,6 +193,7 @@ export default function App() {
             memories={memories}
             iauSettings={iauSettings}
             onSelectRecord={handleOpenRecordForEdit}
+            onOpenProfile={() => setActiveTab('profile')}
           />
         )}
 

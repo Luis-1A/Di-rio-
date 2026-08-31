@@ -44,6 +44,7 @@ interface ChatViewProps {
   memories: MemoryItem[];
   iauSettings: IAUProfileSettings;
   onSelectRecord?: (record: DiaryRecord) => void;
+  onOpenProfile?: () => void;
   onBack?: () => void;
 }
 
@@ -54,6 +55,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   memories = [],
   iauSettings,
   onSelectRecord,
+  onOpenProfile,
   onBack,
 }) => {
   const [inputText, setInputText] = useState('');
@@ -536,17 +538,42 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
         {/* Error / Timeout banner with Retry Action */}
         {streamError && !isStreamingActive && (
-          <div className="p-3 bg-red-50 border border-red-200 rounded-2xl text-xs text-red-700 flex items-center justify-between gap-2">
-            <span className="truncate">{streamError}</span>
-            {lastFailedQuery && (
-              <button
-                onClick={() => handleSendMessage(lastFailedQuery)}
-                className="px-2.5 py-1 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-semibold flex items-center gap-1 shrink-0 cursor-pointer"
-              >
-                <RotateCcw className="w-3 h-3" />
-                Tentar novamente
-              </button>
-            )}
+          <div className="p-3.5 bg-red-50/90 border border-red-200 rounded-2xl text-xs text-red-700 space-y-2">
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+              <div className="flex-1 leading-relaxed">
+                {streamError.includes('GEMINI_API_KEY') || streamError.includes('Chave') ? (
+                  <>
+                    <p className="font-medium text-red-800">Chave do Gemini não encontrada no servidor</p>
+                    <p className="text-[11px] text-red-600 mt-0.5">
+                      Para conversar com a IA, adicione a variável <strong>GEMINI_API_KEY</strong> nas configurações da Vercel ou insira sua chave diretamente nos Ajustes do app.
+                    </p>
+                  </>
+                ) : (
+                  <span>{streamError}</span>
+                )}
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2 pt-1">
+              {(streamError.includes('GEMINI_API_KEY') || streamError.includes('Chave')) && onOpenProfile && (
+                <button
+                  onClick={onOpenProfile}
+                  className="px-3 py-1.5 bg-orange-600 hover:bg-orange-700 text-white rounded-xl text-xs font-medium flex items-center gap-1.5 cursor-pointer shadow-xs"
+                >
+                  <Sparkles className="w-3 h-3" />
+                  Inserir chave em Ajustes
+                </button>
+              )}
+              {lastFailedQuery && (
+                <button
+                  onClick={() => handleSendMessage(lastFailedQuery)}
+                  className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 shrink-0 cursor-pointer shadow-xs"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  Tentar novamente
+                </button>
+              )}
+            </div>
           </div>
         )}
 
