@@ -171,20 +171,35 @@ Eles se dividem principalmente em:
     ],
   },
 
-  // 5. Diário Pessoal e Inteligência Emocional
+  // 6. Curiosidades Fascinantes da Ciência e Matemática
   {
-    id: 'emocional_autoconhecimento',
-    category: 'emocional',
-    keywords: ['diario', 'autoconhecimento', 'emocoes', 'desabafo', 'saude mental', 'reflexao', 'habitos', 'sentimentos'],
-    title: 'A Importância do Diário e do Registro Pessoal',
-    summary: 'Como escrever e registrar sua vida organiza a mente e fortalece o bem-estar.',
-    explanation: `Manter um diário pessoal é uma das práticas mais transformadoras para a clareza mental:
-1. **Alívio Emocional (Catarse)**: Escrever desabafos reduz a carga de ansiedade ao externalizar pensamentos turbulentos.
-2. **Reconhecimento de Padrões**: Reler anotações passadas permite perceber ciclos de humor, gatilhos de estresse e conquistas esquecidas.
-3. **Memória de Longo Prazo**: Momentos preciosos e detalhes do cotidiano não se perdem no tempo.
-4. **Presença e Gratidão**: Tomar alguns minutos diários para pausar e refletir ancora a consciência no presente.`,
+    id: 'cien_curiosidades',
+    category: 'ciencias',
+    keywords: ['curiosidade', 'curiosidades', 'fato interessante', 'ciencia', 'espaco', 'natureza', 'universo', 'mente'],
+    title: 'Curiosidades Fascinantes da Ciência e Matemática',
+    summary: 'Fatos surpreendentes sobre o universo, a biologia e a matemática.',
+    explanation: `Aqui estão curiosidades incríveis da ciência:
+1. **O Mel nunca estraga**: Potes de mel com mais de 3.000 anos encontrados nas tumbas dos faraós egípcios ainda estavam perfeitamente comestíveis, graças à sua baixa umidade e pH ácido natural.
+2. **O cérebro e a energia**: O cérebro humano representa apenas cerca de 2% do peso corporal, mas consome mais de 20% de toda a energia e oxigênio do corpo!
+3. **A Sequência de Fibonacci na Natureza**: O padrão das sementes de girassol, das pinhas e das conchas segue exatamente a sequência matemática de Fibonacci (1, 1, 2, 3, 5, 8, 13...).
+4. **Tempo e a Luz do Sol**: A luz que você vê do Sol agora levou cerca de 8 minutos e 20 segundos para viajar 150 milhões de quilômetros pelo espaço até chegar aos seus olhos.
+5. **Árvores e Conexão**: As árvores de uma floresta comunicam-se e compartilham nutrientes através de uma vasta rede subterrânea de fungos chamada *micorriza* (a "internet das florestas").`,
   },
 ];
+
+export const IAU_CURIOSITIES: string[] = [
+  '🍯 **O mel é o único alimento que nunca estraga!** Arqueólogos encontraram mel em tumbas egípcias de 3.000 anos que ainda estava perfeitamente comestível.',
+  '🧠 **Seu cérebro consome 20% da sua energia**, mesmo pesando apenas cerca de 2% do seu corpo. Pensar e aprender gasta muita energia metabólica!',
+  '🌻 **A natureza ama matemática!** O número de pétalas de flores e a espiral dos girassóis seguem quase sempre a sequência de Fibonacci (1, 1, 2, 3, 5, 8, 13...).',
+  '☀️ **A luz do Sol leva cerca de 8 minutos e 20 segundos** para percorrer 150 milhões de quilômetros e chegar até nós.',
+  '🐙 **O polvo tem 3 corações e sangue azul!** Dois corações bombeiam sangue para as brânquias e o terceiro para o resto do corpo.',
+  '🌲 **As árvores conversam no subsolo!** Elas usam redes de fungos chamadas micorrizas para avisar vizinhas sobre pragas e trocar nutrientes.',
+  '⏳ **Se você dobrar uma folha de papel 42 vezes**, a espessura acumulada por progressão geométrica seria suficiente para chegar até a Lua!',
+];
+
+export function getRandomCuriosity(): string {
+  return IAU_CURIOSITIES[Math.floor(Math.random() * IAU_CURIOSITIES.length)];
+}
 
 /**
  * Busca de tópico de conhecimento básico por palavras-chave

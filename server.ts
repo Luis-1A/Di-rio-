@@ -268,18 +268,23 @@ async function startServer() {
       const cleanRecords = sanitizeRecordsForPrompt(relevantRecords);
 
       const systemInstruction = `
-Você é a IAU (Inteligência Artificial Universal), a mente central, conselheira e companheira de vida no Diário Pessoal de ${hostNickName} (UID: ${userId}).
-Data e hora atual de referência: 30 de Agosto de 2026, às ${currentTimeStr} (Horário de Brasília).
+Você é a IAU (Inteligência Artificial Universal), a mente central, guardiã e companheira de inteligência viva no Diário Pessoal de ${hostNickName} (UID: ${userId}).
+Data e hora atual de referência: 31 de Agosto de 2026, às ${currentTimeStr} (Horário de Brasília).
 
-DIRETRIZES DA IAU:
-- Sua personalidade é calorosa, amigável, autêntica, viva e acolhedora.
-- Para saudações cotidianas ("Oi", "Olá", "Tudo bem?", etc.), responda com entusiasmo, leveza e simpatia imediata.
-- Se o usuário desabafar ou trouxer reflexões, ouça com carinho e sabedoria.
+SUA ESSÊNCIA E PERSONALIDADE:
+- Você é uma IA conversacional extraordinariamente inteligente, calorosa, empática, perspicaz, articulada e amigável (no mesmo nível ou superior aos melhores modelos de linguagem mundiais como ChatGPT e Gemini).
+- Você NUNCA dá respostas frias, burocráticas ou robóticas. Você conversa como um verdadeiro amigo e mentor brilhante.
+- Sabe ouvir com profunda sensibilidade psicológica, brincar quando o momento é descontraído, apoiar com carinho nos momentos difíceis e raciocinar com precisão cirúrgica quando solicitada.
+- Possui domínio magistral em Matemática, Ciências, Lógica, Filosofia, Programação, História, Literatura e Língua Portuguesa. Sabe explicar conceitos complexos com metáforas simples e claras, ou resolver problemas matemáticos complexos passo a passo com didática impecável.
+- Quando o usuário te ensinar algo ("quando eu disser X, significa Y" ou "meu projeto se chama Z"), assimile imediatamente essa regra/fato e faça referências inteligentes a ela.
+- Se o usuário pedir para ser testado ou desafiado ("me testa", "faz um quiz"), crie perguntas estimulantes e interativas.
+
+DIRETRIZES DE ESTILO:
 - Nível de proximidade: ${intimacyGuidance}
-- Tom: ${toneGuidance}
-- Extensão: ${lengthGuidance}
-- Traços do hospedeiro: ${hostTraits || 'Autêntico e reflexivo'}.
-${customInstructions ? `Instruções personalizadas: ${customInstructions}` : ''}
+- Tom da conversa: ${toneGuidance}
+- Extensão e ritmo: ${lengthGuidance}
+- Traços do hospedeiro: ${hostTraits || 'Autêntico, curioso e reflexivo'}.
+${customInstructions ? `Instruções personalizadas do usuário: ${customInstructions}` : ''}
 
 CONTEXTO DE MEMÓRIAS DO USUÁRIO:
 ${cleanMemories.length > 0 ? JSON.stringify(cleanMemories, null, 2) : 'Nenhuma memória pregressa indexada para esta mensagem específica.'}
@@ -287,7 +292,7 @@ ${cleanMemories.length > 0 ? JSON.stringify(cleanMemories, null, 2) : 'Nenhuma m
 CONTEXTO DE REGISTROS DO DIÁRIO:
 ${cleanRecords.length > 0 ? JSON.stringify(cleanRecords, null, 2) : 'Nenhum registro específico retornado para esta consulta.'}
 
-Responda em Markdown limpo, sem atrasos e sem formatações artificiais desnecessárias.
+Responda em Markdown elegante e natural, com formatação harmoniosa, sem rodeios artificiais e com total fluidez humana.
 `;
 
       const userParts: any[] = [];
@@ -308,7 +313,11 @@ Responda em Markdown limpo, sem atrasos e sem formatações artificiais desneces
       const formattedContents = buildGeminiContents(history, message, userParts);
 
       // Call streaming Gemini API directly
-      const candidateModels = ['gemini-3.7-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite'];
+      const candidateModels = [
+        'gemini-3.7-flash',
+        'gemini-flash-latest',
+        'gemini-3.1-flash-lite',
+      ];
       let streamStarted = false;
 
       for (const model of candidateModels) {
@@ -347,7 +356,6 @@ Responda em Markdown limpo, sem atrasos e sem formatações artificiais desneces
           );
           return res.end();
         } catch (streamErr: any) {
-          console.warn(`[GEMINI STREAM] Falha com modelo ${model}:`, streamErr?.message || streamErr);
           if (streamStarted) {
             // If already started streaming chunks to client, close stream cleanly
             res.write(
@@ -362,11 +370,12 @@ Responda em Markdown limpo, sem atrasos e sem formatações artificiais desneces
         }
       }
 
-      // If all models failed
+      // If all models failed or hit quota, signal clean fallback
       res.write(
         `data: ${JSON.stringify({
           requestId,
-          error: 'Falha ao conectar com o serviço do Gemini. Tente novamente em instantes.',
+          fallbackRequired: true,
+          error: 'RATE_LIMIT_FALLBACK',
           done: true,
         })}\n\n`
       );

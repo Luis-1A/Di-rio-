@@ -6,7 +6,7 @@
 
 import { DiaryRecord, IAUProfileSettings, MemoryItem, TimelineArtifact } from '../../types';
 import { analyzeUserIntent, evaluateMathExpression, IntentAnalysisResult } from './intent';
-import { searchKnowledgeBase } from './knowledgeBase';
+import { getRandomCuriosity, searchKnowledgeBase } from './knowledgeBase';
 import { IAUMemoryManager } from './memory';
 import { IAUToolsEngine } from './tools';
 
@@ -54,6 +54,8 @@ export class IAUNativeBrain {
     const length = iauProfile.responseLength || 'adaptive';
     const intimacy = iauProfile.hostIntimacyLevel || 'companion';
 
+    const normalizedMsg = message.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
     // 1. Análise de Intenção e NLU
     const analysis: IntentAnalysisResult = analyzeUserIntent(message, hostName);
 
@@ -66,11 +68,71 @@ export class IAUNativeBrain {
     let appliedRuleExplanation = '';
     for (const rule of rules) {
       if (message.toLowerCase().includes(rule.trigger.toLowerCase())) {
-        appliedRuleExplanation = `\n*(Com base no que você me ensinou: "${rule.trigger}" = ${rule.meaning})*`;
+        appliedRuleExplanation = `\n\n*(Com base no que você me ensinou: "${rule.trigger}" = ${rule.meaning})*`;
       }
     }
 
-    // 4. Execução de Rotas Especializadas da IAU
+    // 4. Detecção de Múltiplos Componentes Conversacionais (Estilo ChatGPT Inteligente)
+    const hasGreeting = /^(oi|ola|olá|bom dia|boa tarde|boa noite|e ai|e aí|fala|opa|salve)\b/i.test(message.trim()) || normalizedMsg.includes('como voce esta') || normalizedMsg.includes('tudo bem');
+    const hasCuriosityReq = normalizedMsg.includes('curiosidade') || normalizedMsg.includes('fato interessante') || normalizedMsg.includes('me conta algo legal');
+    const pctMatch = message.match(/(\d+(?:[.,]\d+)?)\s*%\s*(?:de|\*)\s*(\d+(?:[.,]\d+)?)/i);
+    const hasExplain = normalizedMsg.includes('me explica') || normalizedMsg.includes('como funciona') || normalizedMsg.includes('o que e');
+
+    // Se a mensagem for um diálogo composto (ex: saudação + matemática + curiosidade)
+    if ((hasGreeting || hasCuriosityReq || pctMatch) && (pctMatch || hasCuriosityReq)) {
+      const parts: string[] = [];
+
+      if (hasGreeting) {
+        parts.push(`Olá, **${hostName}**! Eu estou maravilhosa, com as memórias a todo vapor e muito feliz em falar com você! 😊✨`);
+      }
+
+      if (pctMatch) {
+        const pct = parseFloat(pctMatch[1].replace(',', '.'));
+        const val = parseFloat(pctMatch[2].replace(',', '.'));
+        const result = (pct / 100) * val;
+
+        let stepByStep = '';
+        if (pct === 15) {
+          const tenPct = val / 10;
+          const fivePct = tenPct / 2;
+          stepByStep = `
+### 🔢 **Como calcular ${pct}% de ${val} de cabeça (Truque Mental Super Fácil):**
+1. **Ache 10% de ${val}:** Basta andar uma casa com a vírgula para a esquerda ➔ **${tenPct}**.
+2. **Ache 5%:** 5% é exatamente a metade de 10% (a metade de ${tenPct}) ➔ **${fivePct}**.
+3. **Some os dois:** **${tenPct} + ${fivePct} = ${result}**!
+
+> 🎯 **Resultado final:** **${pct}% de ${val} = ${result}**
+`;
+        } else if (pct === 10) {
+          stepByStep = `\n### 🔢 **Cálculo de 10% de ${val}:**\nBasta dividir por 10 (andar uma vírgula para a esquerda):\n> **10% de ${val} = ${result}**\n`;
+        } else if (pct === 20) {
+          const tenPct = val / 10;
+          stepByStep = `\n### 🔢 **Cálculo de 20% de ${val}:**\n1. Ache 10% de ${val} (divida por 10) ➔ **${tenPct}**.\n2. Dobre esse valor (vezes 2) ➔ **${result}**.\n> **20% de ${val} = ${result}**\n`;
+        } else if (pct === 50) {
+          stepByStep = `\n### 🔢 **Cálculo de 50% de ${val}:**\n50% é a metade exata do número:\n> **50% de ${val} = ${result}**\n`;
+        } else {
+          stepByStep = `
+### 🔢 **Resolução Matemática:**
+Para achar **${pct}% de ${val}**, multiplicamos o valor pela fração percentual (${pct}/100 = ${(pct / 100).toFixed(2)}):
+> **${val} × ${(pct / 100)} = ${result.toLocaleString('pt-BR', { maximumFractionDigits: 4 })}**
+`;
+        }
+        parts.push(stepByStep.trim());
+      }
+
+      if (hasCuriosityReq) {
+        const curiosity = getRandomCuriosity();
+        parts.push(`💡 **E aqui vai uma curiosidade fascinante para você:**\n\n${curiosity}`);
+      }
+
+      parts.push(`O que mais gostaria de explorar agora, **${hostName}**? Posso resolver outras contas, te explicar conceitos ou bater um papo reflexivo!`);
+
+      return {
+        reply: parts.join('\n\n') + appliedRuleExplanation,
+      };
+    }
+
+    // 5. Execução de Rotas Especializadas da IAU
 
     // Rota A: Aprendizado de Regra ("Quando eu falar X significa Y")
     if (analysis.intent === 'TEACH_RULE' && analysis.extractedRule) {
@@ -212,12 +274,12 @@ export class IAUNativeBrain {
       };
     }
 
-    // Rota H: Cálculo Matemático
+    // Rota H: Cálculo Matemático com Passo a Passo Didático
     if (analysis.intent === 'MATH_CALC' && analysis.mathExpression) {
       const evaluated = evaluateMathExpression(analysis.mathExpression);
       if (evaluated) {
         return {
-          reply: `🔢 **Resultado do Cálculo:**\n\n> **${evaluated.formatted}**\n\nPrecisa de mais alguma conta ou análise lógica?`,
+          reply: `🔢 **Resolução Matemática Passo a Passo:**\n\n> **Expressão:** \`${analysis.mathExpression}\`\n> **Resultado:** **${evaluated.formatted}**\n\n💡 *Dica didática:* Se quiser ver gráficos, derivações, equações com incógnitas ($x$) ou problemas contextualizados, é só me pedir!`,
         };
       }
     }
@@ -233,7 +295,7 @@ export class IAUNativeBrain {
       });
       const timeStr = now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
       return {
-        reply: `📅 Hoje é **${dateStr}**, exatamente **${timeStr}**.\n\nUm ótimo momento para registrar suas reflexões ou planejar suas próximas metas no diário!`,
+        reply: `📅 Hoje é **${dateStr}**, exatamente **${timeStr}**.\n\nComo está sendo o ritmo do seu dia até agora? Quer registrar alguma meta ou reflexão no diário?`,
       };
     }
 
@@ -248,7 +310,7 @@ export class IAUNativeBrain {
           recText += `${idx + 1}. **${r.title}** (${r.date || 'Sem data'})\n`;
           recText += `   > ${(r.content || '').slice(0, 140)}...\n\n`;
         });
-        recText += `Deseja que eu abra algum deles ou faça um resumo detalhado?`;
+        recText += `Deseja que eu abra algum deles, faça um resumo ou crie uma continuação?`;
         return {
           reply: recText,
           referencedRecordIds: foundRecords.map((r) => r.id),
@@ -256,19 +318,19 @@ export class IAUNativeBrain {
       }
 
       return {
-        reply: `Pesquisei no seu diário por *"${query}"*, mas não encontrei anotações correspondentes ainda. Deseja criar uma nova entrada sobre isso agora?`,
+        reply: `Pesquisei no seu diário por *"${query}"*, mas ainda não encontrei anotações com esse tema. Deseja criar uma nova entrada para registrar isso agora?`,
       };
     }
 
     // Rota K: Linha do Tempo
     if (analysis.intent === 'CREATE_TIMELINE') {
       const timeline = IAUToolsEngine.generateTimeline(relevantRecords);
-      let reply = `📅 **Linha do Tempo Estruturada**\n\nCompilei os seus acontecimentos mais recentes em uma cronologia organizada:\n\n`;
+      let reply = `📅 **Linha do Tempo Estruturada dos Seus Registros**\n\nCompilei os seus acontecimentos recentes em uma ordem cronológica clara:\n\n`;
 
       timeline.items.slice(0, 5).forEach((item) => {
         reply += `- **${item.date}:** *${item.title}* — ${item.summary}\n`;
       });
-      reply += `\nVocê pode visualizar e navegar por todos os marcos na aba **Arquivo / Linha do Tempo**!`;
+      reply += `\nVocê pode navegar por todos os marcos na aba **Arquivo / Linha do Tempo**!`;
 
       return {
         reply,
@@ -277,48 +339,48 @@ export class IAUNativeBrain {
       };
     }
 
-    // Rota L: Saudações
+    // Rota L: Saudações com calor humano e vivacidade
     if (analysis.intent === 'GREETING') {
       const greetings = [
-        `Olá, **${hostName}**! Que alegria te ver por aqui. Como você está se sentindo hoje?`,
-        `Oi, **${hostName}**! Estou 100% pronta e conectada. Sobre o que você gostaria de conversar ou registrar hoje?`,
-        `Olá, **${hostName}**! Tudo ótimo por aqui. Como foi seu dia até agora? Estou pronta para te ouvir ou te ajudar com seus registros!`,
+        `Olá, **${hostName}**! Que alegria te ver por aqui hoje. Como está o seu dia e o que tem passado pela sua mente?`,
+        `Oi, **${hostName}**! Tudo ótimo por aqui, sempre pronta e animada para te acompanhar. Como você está se sentindo neste momento?`,
+        `Olá, **${hostName}**! É sempre um prazer conversar com você. Estou aqui para o que precisar: conversar, refletir, fazer contas ou registrar momentos!`,
       ];
       const selected = greetings[Math.floor(Math.random() * greetings.length)];
       return { reply: `${selected}${appliedRuleExplanation}` };
     }
 
-    // Rota M: Desabafo Emocional
+    // Rota M: Desabafo Emocional Profundo
     if (analysis.intent === 'EMOTIONAL_VENT') {
       if (analysis.sentiment === 'distressed') {
         return {
-          reply: `Sinto muito que você esteja passando por isso, **${hostName}**. 🤍\n\nEstou aqui com você. Às vezes o dia é pesado e tudo bem desacelerar. Quer desabafar mais sobre o que aconteceu? Colocar em palavras no diário pode ajudar a tirar o peso do peito. Te ouço com toda a atenção.${appliedRuleExplanation}`,
+          reply: `Sinto muito que você esteja se sentindo assim, **${hostName}**. 🤍\n\nQuero que saiba que este é um espaço 100% seguro para você ser você mesmo, sem julgamentos. Às vezes o mundo exige demais da gente e o coração fica pesado.\n\nQuer me contar com calma o que aconteceu? Colocar em palavras aqui no diário ajuda muito a aliviar a mente. Estou aqui para te ouvir com toda a atenção.${appliedRuleExplanation}`,
         };
       }
       return {
-        reply: `Que notícia maravilhosa, **${hostName}**! Fico imensamente feliz por você. 🌟\n\nRegistrar esses momentos de alegria e vitória no diário é precioso para quando precisarmos nos lembrar da nossa força. Me conta mais sobre o que tornou o seu dia tão especial!${appliedRuleExplanation}`,
+        reply: `Que momento fantástico, **${hostName}**! Fico imensamente feliz por você! 🌟\n\nEssas vitórias e momentos de leveza merecem ser eternizados no seu diário para sempre que você precisar se lembrar da sua força.\n\nO que foi que mais te marcou nisso tudo? Me conta mais detalhes!${appliedRuleExplanation}`,
       };
     }
 
-    // Rota N: Conversa Geral / Reflexiva
-    let defaultResponse = `Compreendo seus pensamentos, **${hostName}**. `;
+    // Rota N: Conversa Geral / Inteligente / Dinâmica (Estilo ChatGPT)
+    let dynamicReply = '';
 
     if (tone === 'witty') {
-      defaultResponse += `Sua perspectiva é sempre interessante! Como você gostaria de conduzir essa ideia agora?`;
+      dynamicReply = `Essa é uma excelente colocação, **${hostName}**! Adorei a forma como você pensou nisso.\n\nSe a gente analisar por um ângulo perspicaz, isso abre muitas possibilidades interessantes. Como você pretende avançar com essa ideia?`;
     } else if (tone === 'thoughtful') {
-      defaultResponse += `Toda reflexão sincera abre espaço para novas descobertas interiores. Como isso se conecta com os seus projetos atuais?`;
+      dynamicReply = `Refletir sobre isso traz insights profundos, **${hostName}**.\n\nCada pensamento que você compartilha aqui constrói um panorama mais claro de quem você é e dos caminhos que quer trilhar. O que mais te chama atenção nesse assunto?`;
     } else if (tone === 'direct') {
-      defaultResponse += `Entendido. Como posso te auxiliar com isso nos seus registros ou tarefas?`;
+      dynamicReply = `Compreendido, **${hostName}**. Podemos analisar isso sob diferentes perspectivas práticas, calcular impactos ou estruturar um plano claro. O que você gostaria de priorizar agora?`;
     } else {
-      defaultResponse += `Estou aqui te acompanhando em cada reflexão. Deseja guardar esse pensamento no diário ou explorar mais esse assunto?`;
+      dynamicReply = `Compreendo perfeitamente o seu ponto, **${hostName}**! É muito interessante ver como suas ideias se conectam.\n\nEstou aqui para aprofundar nessa conversa com você, fazer cálculos, criar questionários ou guardar essas reflexões no seu diário. Como gostaria de continuar?`;
     }
 
     if (length === 'short') {
-      defaultResponse = `Entendido, ${hostName}. Estou pronta para o próximo passo.`;
+      dynamicReply = `Entendido, ${hostName}! Estou totalmente alinhada com você. Qual é o próximo passo?`;
     }
 
     return {
-      reply: `${defaultResponse}${appliedRuleExplanation}`,
+      reply: `${dynamicReply}${appliedRuleExplanation}`,
     };
   }
 }
