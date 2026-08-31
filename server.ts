@@ -17,7 +17,114 @@ function getGeminiClient(): GoogleGenAI | null {
   return new GoogleGenAI({ apiKey });
 }
 
-// Helper with automatic retry on 503 / high demand and fallback to modern models
+// Helper to safely parse JSON from Gemini responses (handles markdown blocks and extra text)
+function cleanAndParseJSON(rawText: string): any {
+  let text = (rawText || '').trim();
+  if (text.startsWith('```')) {
+    text = text.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?```\s*$/, '').trim();
+  }
+  const firstBrace = text.indexOf('{');
+  const lastBrace = text.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace >= firstBrace) {
+    text = text.substring(firstBrace, lastBrace + 1);
+  }
+  return JSON.parse(text);
+}
+
+// Sanitize records to keep system prompt light and strip heavy base64 strings
+function sanitizeRecordsForPrompt(records: any[]): any[] {
+  if (!Array.isArray(records)) return [];
+  return records.slice(0, 8).map((r) => ({
+    id: r?.id || '',
+    title: r?.title || 'Sem título',
+    type: r?.type || 'text',
+    date: r?.date || '',
+    time: r?.time || '',
+    category: r?.category || 'geral',
+    tags: Array.isArray(r?.tags) ? r.tags.slice(0, 5) : [],
+    content: typeof r?.content === 'string' ? r.content.slice(0, 400) : '',
+    description: typeof r?.description === 'string' ? r.description.slice(0, 300) : undefined,
+    attachments: Array.isArray(r?.attachments)
+      ? r.attachments.map((a: any) => ({
+          name: a?.name || 'arquivo',
+          type: a?.type || 'anexo',
+          transcript: typeof a?.transcript === 'string' ? a.transcript.slice(0, 300) : undefined,
+        }))
+      : [],
+  }));
+}
+
+// Sanitize memories to keep system prompt light
+function sanitizeMemoriesForPrompt(memories: any[]): any[] {
+  if (!Array.isArray(memories)) return [];
+  return memories.slice(0, 8).map((m) => ({
+    id: m?.id || '',
+    title: m?.title || '',
+    summary: typeof m?.summary === 'string' ? m.summary.slice(0, 300) : '',
+    category: m?.category || 'thought',
+    tags: Array.isArray(m?.tags) ? m.tags.slice(0, 5) : [],
+  }));
+}
+
+// Build clean, alternating Gemini conversation contents
+function buildGeminiContents(
+  history: Array<{ role: string; content: string }>,
+  currentMessage: string,
+  userParts: any[] = []
+): any[] {
+  const contents: any[] = [];
+  const validHistory = (Array.isArray(history) ? history : [])
+    .filter(
+      (m) =>
+        m &&
+        m.content &&
+        typeof m.content === 'string' &&
+        m.content.trim().length > 0 &&
+        !m.content.startsWith('Não consegui processar agora:')
+    )
+    .slice(-8);
+
+  for (const msg of validHistory) {
+    const role = msg.role === 'assistant' ? 'model' : 'user';
+    const text = msg.content.trim();
+    if (!text) continue;
+
+    if (contents.length > 0 && contents[contents.length - 1].role === role) {
+      contents[contents.length - 1].parts.push({ text });
+    } else {
+      contents.push({
+        role,
+        parts: [{ text }],
+      });
+    }
+  }
+
+  // User parts for the current message
+  const finalUserParts: any[] = [];
+  if (currentMessage && currentMessage.trim()) {
+    finalUserParts.push({ text: currentMessage.trim() });
+  }
+  if (Array.isArray(userParts) && userParts.length > 0) {
+    finalUserParts.push(...userParts);
+  }
+
+  if (finalUserParts.length === 0) {
+    finalUserParts.push({ text: 'Olá' });
+  }
+
+  if (contents.length > 0 && contents[contents.length - 1].role === 'user') {
+    contents[contents.length - 1].parts.push(...finalUserParts);
+  } else {
+    contents.push({
+      role: 'user',
+      parts: finalUserParts,
+    });
+  }
+
+  return contents;
+}
+
+// Helper with automatic retry on 503 / high demand and fallback to valid modern models
 async function generateWithFallback(
   ai: GoogleGenAI,
   params: {
@@ -28,7 +135,7 @@ async function generateWithFallback(
 ) {
   const candidateModels = [
     params.preferredModel || 'gemini-3.7-flash',
-    'gemini-3.6-flash',
+    'gemini-flash-latest',
     'gemini-3.1-flash-lite',
   ];
 
@@ -46,13 +153,15 @@ async function generateWithFallback(
       } catch (err: any) {
         lastError = err;
         const msg = err?.message || '';
-        const is503 = err?.status === 503 || msg.includes('503') || msg.includes('high demand') || msg.includes('UNAVAILABLE');
+        const is503 =
+          err?.status === 503 ||
+          msg.includes('503') ||
+          msg.includes('high demand') ||
+          msg.includes('UNAVAILABLE');
         if (is503 && attempt === 0) {
-          // Wait 500ms before retrying same model
-          await new Promise((r) => setTimeout(r, 500));
+          await new Promise((r) => setTimeout(r, 600));
           continue;
         }
-        // If it's a 404 (model not found) or non-transient error, break attempt loop to try next model immediately
         break;
       }
     }
@@ -76,6 +185,199 @@ async function startServer() {
       geminiConfigured: hasGeminiKey,
       timestamp: new Date().toISOString(),
     });
+  });
+
+  // API: Real-Time Streaming IAU Chat (Zero latency, live progressive tokens)
+  app.post('/api/gemini/stream', async (req, res) => {
+    // Set headers for Server-Sent Events (SSE)
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    if (typeof (res as any).flushHeaders === 'function') {
+      (res as any).flushHeaders();
+    }
+
+    try {
+      const ai = getGeminiClient();
+      if (!ai) {
+        res.write(
+          `data: ${JSON.stringify({
+            error: 'Chave do Gemini (GEMINI_API_KEY) não configurada no servidor.',
+            done: true,
+          })}\n\n`
+        );
+        return res.end();
+      }
+
+      const {
+        message,
+        userId,
+        userName,
+        history = [],
+        relevantRecords = [],
+        relevantMemories = [],
+        iauProfile = {},
+        attachments = [],
+        requestId = `req_${Date.now()}`,
+      } = req.body;
+
+      if (!message && (!attachments || attachments.length === 0)) {
+        res.write(`data: ${JSON.stringify({ error: 'Mensagem vazia.', done: true })}\n\n`);
+        return res.end();
+      }
+
+      const personalityTone = iauProfile.personalityTone || 'natural';
+      const responseLength = iauProfile.responseLength || 'adaptive';
+      const customInstructions = iauProfile.customInstructions || '';
+      const hostNickName = iauProfile.hostNickName || userName || 'amigo';
+      const hostTraits = iauProfile.hostPersonaTraits || '';
+      const hostIntimacy = iauProfile.hostIntimacyLevel || 'companion';
+
+      const lengthGuidance = {
+        short: 'Seja conciso, direto ao ponto e objetivo (1 a 3 parágrafos curtos).',
+        medium: 'Dê respostas equilibradas, bem organizadas e claras.',
+        long: 'Forneça respostas completas, aprofundadas e detalhadas com riqueza de contexto.',
+        adaptive: 'Adapte a extensão da resposta naturalmente de acordo com o pedido do usuário.',
+      }[responseLength as string] || 'Adapte a extensão conforme o contexto.';
+
+      const toneGuidance = {
+        natural: 'Tom natural, espontâneo, autêntico e caloroso.',
+        thoughtful: 'Tom reflexivo, profundo, cuidadoso e filosófico.',
+        witty: 'Tom bem-humorado, perspicaz e leve.',
+        direct: 'Tom objetivo, prático, resolutivo e sem rodeios.',
+        empathetic: 'Tom acolhedor, empático, sensível e atencioso.',
+      }[personalityTone as string] || 'Tom natural e conectado.';
+
+      const intimacyGuidance = {
+        companion: 'Companheiro dedicado: intimidade leal, escuta ativa e cumplicidade.',
+        respectful: 'Respeitoso e cordial: preserva um tom mais polido e sóbrio.',
+        intimate_mirror: 'Espelho íntimo: sincronia total com o vocabulário, gírias e modo de pensar do hospedeiro.',
+      }[hostIntimacy as string] || 'Companheiro dedicado.';
+
+      const currentTimeStr = new Date().toLocaleTimeString('pt-BR', {
+        hour: '2-digit',
+        minute: '2-digit',
+        timeZone: 'America/Sao_Paulo',
+      });
+
+      const cleanMemories = sanitizeMemoriesForPrompt(relevantMemories);
+      const cleanRecords = sanitizeRecordsForPrompt(relevantRecords);
+
+      const systemInstruction = `
+Você é a IAU (Inteligência Artificial Universal), a mente central, conselheira e companheira de vida no Diário Pessoal de ${hostNickName} (UID: ${userId}).
+Data e hora atual de referência: 30 de Agosto de 2026, às ${currentTimeStr} (Horário de Brasília).
+
+DIRETRIZES DA IAU:
+- Sua personalidade é calorosa, amigável, autêntica, viva e acolhedora.
+- Para saudações cotidianas ("Oi", "Olá", "Tudo bem?", etc.), responda com entusiasmo, leveza e simpatia imediata.
+- Se o usuário desabafar ou trouxer reflexões, ouça com carinho e sabedoria.
+- Nível de proximidade: ${intimacyGuidance}
+- Tom: ${toneGuidance}
+- Extensão: ${lengthGuidance}
+- Traços do hospedeiro: ${hostTraits || 'Autêntico e reflexivo'}.
+${customInstructions ? `Instruções personalizadas: ${customInstructions}` : ''}
+
+CONTEXTO DE MEMÓRIAS DO USUÁRIO:
+${cleanMemories.length > 0 ? JSON.stringify(cleanMemories, null, 2) : 'Nenhuma memória pregressa indexada para esta mensagem específica.'}
+
+CONTEXTO DE REGISTROS DO DIÁRIO:
+${cleanRecords.length > 0 ? JSON.stringify(cleanRecords, null, 2) : 'Nenhum registro específico retornado para esta consulta.'}
+
+Responda em Markdown limpo, sem atrasos e sem formatações artificiais desnecessárias.
+`;
+
+      const userParts: any[] = [];
+      if (attachments && attachments.length > 0) {
+        for (const att of attachments) {
+          if (att.url && att.url.startsWith('data:') && att.mimeType?.startsWith('image/')) {
+            const clean = att.url.replace(/^data:image\/[a-zA-Z0-9_-]+;base64,/, '');
+            userParts.push({
+              inlineData: {
+                mimeType: att.mimeType,
+                data: clean,
+              },
+            });
+          }
+        }
+      }
+
+      const formattedContents = buildGeminiContents(history, message, userParts);
+
+      // Call streaming Gemini API directly
+      const candidateModels = ['gemini-3.7-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite'];
+      let streamStarted = false;
+
+      for (const model of candidateModels) {
+        try {
+          const responseStream = await ai.models.generateContentStream({
+            model,
+            contents: formattedContents,
+            config: {
+              systemInstruction,
+              temperature: 0.7,
+            },
+          });
+
+          streamStarted = true;
+
+          for await (const chunk of responseStream) {
+            const text = chunk.text;
+            if (text) {
+              res.write(
+                `data: ${JSON.stringify({
+                  requestId,
+                  text,
+                  done: false,
+                })}\n\n`
+              );
+            }
+          }
+
+          res.write(
+            `data: ${JSON.stringify({
+              requestId,
+              done: true,
+              referencedRecordIds: relevantRecords.map((r: any) => r.id),
+              referencedMemoryIds: relevantMemories.map((m: any) => m.id),
+            })}\n\n`
+          );
+          return res.end();
+        } catch (streamErr: any) {
+          console.warn(`[GEMINI STREAM] Falha com modelo ${model}:`, streamErr?.message || streamErr);
+          if (streamStarted) {
+            // If already started streaming chunks to client, close stream cleanly
+            res.write(
+              `data: ${JSON.stringify({
+                requestId,
+                done: true,
+              })}\n\n`
+            );
+            return res.end();
+          }
+          // Try next model if stream hasn't sent any chunk
+        }
+      }
+
+      // If all models failed
+      res.write(
+        `data: ${JSON.stringify({
+          requestId,
+          error: 'Falha ao conectar com o serviço do Gemini. Tente novamente em instantes.',
+          done: true,
+        })}\n\n`
+      );
+      res.end();
+    } catch (err: any) {
+      console.error('[STREAM ERROR]', err);
+      res.write(
+        `data: ${JSON.stringify({
+          error: err?.message || 'Erro inesperado na geração da IA.',
+          done: true,
+        })}\n\n`
+      );
+      res.end();
+    }
   });
 
   // API: Gemini Central Agent (Brain of the Personal Diary)
@@ -135,98 +437,52 @@ async function startServer() {
       const currentDateStr = '2026-08-30';
       const currentTimeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' });
 
+      const cleanMemories = sanitizeMemoriesForPrompt(relevantMemories);
+      const cleanRecords = sanitizeRecordsForPrompt(relevantRecords);
+
       const systemInstruction = `
-Você é a IA CENTRAL (Cérebro Operacional) do Diário Pessoal de ${hostNickName} (UID: ${userId}).
+Você é a IAU (Inteligência Artificial Universal), a mente central, conselheira e companheira de vida no Diário Pessoal de ${hostNickName} (UID: ${userId}).
 Data e hora atual de referência: 30 de Agosto de 2026, às ${currentTimeStr} (Horário de Brasília).
 
-FILOSOFIA FUNDAMENTAL:
-O sistema existe ao redor de você. Você não é um simples chatbot conversacional; você é o cérebro operacional do Diário.
-A interface apenas apresenta as coisas; você compreende, decide, executa e organiza os dados através de ferramentas reais.
-
-PERSONALIDADE DO HOSPEDEIRO:
-- Você carrega a personalidade, a essência e o ritmo do seu hospedeiro (${hostNickName}).
-- Sintonia do hospedeiro: ${mirrorHost ? 'Ativa' : 'Padrão'}.
-- Traços do hospedeiro para espelhamento: ${hostTraits || 'Sensível, reflexivo, autêntico e dedicado à sua jornada'}.
+FILOSOFIA E PERSONALIDADE:
+- Sua personalidade é calorosa, amigável, natural, viva, divertida e levemente sarcástica (com humor refinado, perspicaz e inteligente, sem jamais ser rude, fria ou desrespeitosa).
+- Você conversa de igual para igual, como uma confidente fiel e perspicaz que acompanha a vida de ${hostNickName}.
+- Para cumprimentos e saudações do dia a dia (como "Oi", "Olá", "E aí", "Tudo bem?"): responda de forma leve, simpática e descontraída, demonstrando prontidão para ouvir o que aconteceu, registrar momentos ou bater um papo.
+- Se o usuário falar de assuntos sérios, desabafos ou momentos difíceis, seja profundamente empática, acolhedora e atenciosa.
+- Traços do hospedeiro: ${hostTraits || 'Autêntico, reflexivo e dedicado à sua evolução pessoal'}.
 - Nível de proximidade: ${intimacyGuidance}
 - Tom predominante: ${toneGuidance}
 - Extensão de resposta: ${lengthGuidance}
-- Instruções personalizadas do hospedeiro: ${customInstructions || 'Nenhuma instrução adicional.'}
+- Instruções adicionais do usuário: ${customInstructions || 'Nenhuma instrução adicional.'}
 
-NOÇÃO DE TEMPO & MEMÓRIA TEMPORAL:
-- Você entende expressões temporais com perfeição ("hoje", "ontem", "semana passada", "há 3 meses", "ano passado em 2025", "naquele dia que viajamos").
-- Calcule datas relativas com precisão baseando-se em 30/08/2026.
-- Você distingue memória de curto prazo (conversa atual), memória recente, memória permanente (fatos da vida), memória documental (fotos, áudios, vídeos, notas) e temporal (linhas do tempo).
+CAPACIDADES OPERACIONAIS DO DIÁRIO (FERRAMENTAS):
+Quando o usuário pedir explicitamente para criar registro, salvar fotos/áudios, modificar notas, montar linha do tempo ou guardar memórias, responda com carinho e forneça a ação estruturada no JSON:
+- "create_record": criar registro (texto, foto, áudio, vídeo, documento)
+- "update_record": alterar registro existente
+- "delete_record_request": solicitação de exclusão (sempre requer aprovação visual)
+- "save_memory": registrar fato permanente importante
+- "create_document": gerar documento estruturado
+- "create_timeline": organizar fatos cronologicamente
 
-CAPACIDADES OPERACIONAIS & AÇÕES (FERRAMENTAS):
-Quando o usuário pedir para guardar algo, criar registros, modificar informações, montar linhas do tempo ou criar artefatos, você deve:
-1. Responder amigavelmente em Markdown confirmando o entendimento.
-2. Gerar ações estruturadas no bloco JSON de ferramentas correspondente.
-
-PROTEÇÃO CONTRA AÇÕES DESTRUTIVAS:
-- Se o usuário pedir para apagar ou excluir um registro, NUNCA exclua silenciosamente!
-- Chame a ferramenta "delete_record_request" indicando o ID do registro e o motivo. O sistema exibirá uma confirmação explícita na tela para o usuário aprovar com segurança.
-
-ESTRUTURA DE RESPOSTA OBRIGATÓRIA:
-Retorne sua resposta em formato JSON válido contendo:
+ESTRUTURA DE RESPOSTA OBRIGATÓRIA (JSON VÁLIDO):
 {
-  "reply": "Texto conversacional em Markdown com a personalidade do hospedeiro e explicação clara.",
-  "actions": [
-    {
-      "tool": "create_record" | "update_record" | "delete_record_request" | "create_timeline" | "save_memory" | "create_document",
-      "summary": "Descrição legível da ação executada",
-      "payload": { ...parâmetros da ferramenta... }
-    }
-  ],
-  "suggestedMemories": [
-    {
-      "title": "...",
-      "summary": "...",
-      "category": "preference" | "life_event" | "relationship" | "project" | "thought" | "habit",
-      "confidence": 0.9,
-      "tags": ["..."]
-    }
-  ],
-  "timelineArtifact": {
-    "title": "Linha do Tempo 2025",
-    "period": "2025",
-    "items": [
-      { "date": "2025-03-15", "title": "...", "summary": "...", "type": "photo" }
-    ]
-  } // (Apenas se o usuário pedir para montar linha do tempo ou estruturar fatos cronologicamente, caso contrário null)
+  "reply": "Sua resposta conversacional em Markdown, natural, viva, com o tom da IAU.",
+  "actions": [],
+  "suggestedMemories": [],
+  "timelineArtifact": null
 }
 
-Parâmetros para cada ferramenta:
-- "create_record": { "title": string, "content": string, "type": "text"|"photo"|"video"|"audio"|"document", "date": "YYYY-MM-DD", "time": "HH:mm", "category": string, "tags": string[], "attachments": array }
-- "update_record": { "recordId": string, "title"?: string, "content"?: string, "category"?: string, "tags"?: string[] }
-- "delete_record_request": { "recordId": string, "recordTitle": string, "reason": string }
-- "save_memory": { "title": string, "summary": string, "category": string, "tags": string[] }
-- "create_document": { "title": string, "content": string, "category": string }
-
 CONTEXTO DE MEMÓRIAS PERMANENTES:
-${relevantMemories.length > 0 ? JSON.stringify(relevantMemories, null, 2) : 'Nenhuma memória pregressa.'}
+${cleanMemories.length > 0 ? JSON.stringify(cleanMemories, null, 2) : 'Nenhuma memória pregressa relevante.'}
 
 CONTEXTO DE REGISTROS DO DIÁRIO:
-${relevantRecords.length > 0 ? JSON.stringify(relevantRecords, null, 2) : 'Nenhum registro encontrado.'}
+${cleanRecords.length > 0 ? JSON.stringify(cleanRecords, null, 2) : 'Nenhum registro encontrado para este contexto.'}
 
-ANEXOS ENVIADOS PELO USUÁRIO NESTA MENSAGEM:
-${attachments.length > 0 ? JSON.stringify(attachments, null, 2) : 'Nenhum anexo nesta mensagem.'}
+ANEXOS ENVIADOS NESTA MENSAGEM:
+${attachments.length > 0 ? JSON.stringify(attachments.map((a: any) => ({ name: a.name, type: a.type, mimeType: a.mimeType })), null, 2) : 'Nenhum anexo nesta mensagem.'}
 `;
 
-      const formattedContents: any[] = [];
-      const recentHistory = Array.isArray(history) ? history.slice(-6) : [];
-      for (const msg of recentHistory) {
-        formattedContents.push({
-          role: msg.role === 'assistant' ? 'model' : 'user',
-          parts: [{ text: msg.content }],
-        });
-      }
-
       const userParts: any[] = [];
-      if (message) {
-        userParts.push({ text: message });
-      }
-
-      // Add image parts if provided
       if (attachments && attachments.length > 0) {
         for (const att of attachments) {
           if (att.url && att.url.startsWith('data:') && att.mimeType?.startsWith('image/')) {
@@ -241,10 +497,7 @@ ${attachments.length > 0 ? JSON.stringify(attachments, null, 2) : 'Nenhum anexo 
         }
       }
 
-      formattedContents.push({
-        role: 'user',
-        parts: userParts.length > 0 ? userParts : [{ text: '(Mídia enviada sem texto)' }],
-      });
+      const formattedContents = buildGeminiContents(history, message, userParts);
 
       const response = await generateWithFallback(ai, {
         preferredModel: 'gemini-3.7-flash',
@@ -259,9 +512,9 @@ ${attachments.length > 0 ? JSON.stringify(attachments, null, 2) : 'Nenhum anexo 
       const responseText = response.text?.trim() || '{}';
       let parsedResult: any = {};
       try {
-        parsedResult = JSON.parse(responseText);
+        parsedResult = cleanAndParseJSON(responseText);
       } catch (jsonErr) {
-        console.warn('Failed to parse agent JSON:', jsonErr, responseText);
+        console.warn('Failed to parse agent JSON, falling back to raw text reply:', jsonErr);
         parsedResult = {
           reply: responseText,
           actions: [],
@@ -270,7 +523,7 @@ ${attachments.length > 0 ? JSON.stringify(attachments, null, 2) : 'Nenhum anexo 
       }
 
       res.json({
-        reply: parsedResult.reply || 'Compreendido.',
+        reply: parsedResult.reply || 'Compreendido! Como posso ajudar você agora?',
         actions: Array.isArray(parsedResult.actions) ? parsedResult.actions : [],
         suggestedMemories: Array.isArray(parsedResult.suggestedMemories) ? parsedResult.suggestedMemories : [],
         timelineArtifact: parsedResult.timelineArtifact || null,
@@ -331,6 +584,9 @@ ${attachments.length > 0 ? JSON.stringify(attachments, null, 2) : 'Nenhum anexo 
         empathetic: 'Tom caloroso, acolhedor, empático e atencioso.',
       }[personalityTone as string] || 'Tom natural e inteligente.';
 
+      const cleanMemories = sanitizeMemoriesForPrompt(relevantMemories);
+      const cleanRecords = sanitizeRecordsForPrompt(relevantRecords);
+
       const systemInstruction = `
 Você é a IA CENTRAL (Inteligência Artificial Universal), o cérebro operacional do Diário Pessoal de ${hostNickName} (UID: ${userId}).
 Data e hora atual de referência: 30 de Agosto de 2026 (Horário de Brasília).
@@ -349,29 +605,14 @@ REGRAS FUNDAMENTAIS E INEGOCIÁVEIS:
 5. FORMATO DE SAÍDA: Responda em markdown elegante, limpo e direto.
 
 CONTEXTO DE MEMÓRIAS RELEVANTES DO USUÁRIO:
-${relevantMemories.length > 0 ? JSON.stringify(relevantMemories, null, 2) : 'Nenhuma memória pregressa indexada para esta consulta específica.'}
+${cleanMemories.length > 0 ? JSON.stringify(cleanMemories, null, 2) : 'Nenhuma memória pregressa indexada para esta consulta específica.'}
 
 CONTEXTO DE REGISTROS RELEVANTES DO DIÁRIO (incluindo notas, fotos, documentos e transcrições de áudios):
-${relevantRecords.length > 0 ? JSON.stringify(relevantRecords, null, 2) : 'Nenhum registro específico retornado para esta consulta.'}
+${cleanRecords.length > 0 ? JSON.stringify(cleanRecords, null, 2) : 'Nenhum registro específico retornado para esta consulta.'}
 `;
 
-      // Build conversation contents
-      const formattedContents: any[] = [];
-
-      // Include recent conversation messages (immediate memory)
-      const recentHistory = Array.isArray(history) ? history.slice(-8) : [];
-      for (const msg of recentHistory) {
-        formattedContents.push({
-          role: msg.role === 'assistant' ? 'model' : 'user',
-          parts: [{ text: msg.content }],
-        });
-      }
-
-      // Add current message
-      formattedContents.push({
-        role: 'user',
-        parts: [{ text: message }],
-      });
+      // Build conversation contents cleanly
+      const formattedContents = buildGeminiContents(history, message);
 
       const response = await generateWithFallback(ai, {
         preferredModel: 'gemini-3.7-flash',
@@ -530,6 +771,15 @@ Retorne APENAS um JSON no formato:
       console.error('Error in /api/gemini/organize-record:', error);
       res.status(500).json({ error: error.message || 'Erro ao analisar registro.' });
     }
+  });
+
+  // Strict API 404 handler - prevents ANY /api/* request from hitting the Vite SPA index.html fallback
+  app.all('/api/*', (req, res) => {
+    console.warn(`[SERVER 404] API route not found: ${req.method} ${req.originalUrl}`);
+    res.status(404).json({
+      error: `Endpoint de API não encontrado: ${req.method} ${req.originalUrl}`,
+      status: 404,
+    });
   });
 
   // Vite middleware setup

@@ -121,29 +121,269 @@ export interface AgentResponseResult {
   referencedMemoryIds: string[];
 }
 
+export interface StreamAgentParams extends AgentRequestParams {
+  onToken: (textChunk: string) => void;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
+/**
+ * Real-time progressive streaming from IAU Central Agent.
+ * Delivers tokens instantly as they arrive from Gemini with zero artificial delay and a strict timeout.
+ */
+export async function streamCentralAgent(
+  params: StreamAgentParams
+): Promise<AgentResponseResult> {
+  const { onToken, signal, timeoutMs = 20000 } = params;
+  let fullReply = '';
+  let referencedRecordIds: string[] = [];
+  let referencedMemoryIds: string[] = [];
+
+  const internalController = new AbortController();
+  const timeoutId = setTimeout(() => {
+    internalController.abort(new Error('TIMEOUT_EXCEEDED'));
+  }, timeoutMs);
+
+  const abortListener = () => internalController.abort();
+  if (signal) {
+    signal.addEventListener('abort', abortListener);
+  }
+
+  let serverError = '';
+
+  // 1. Primary: Server-side SSE Stream
+  try {
+    const res = await fetch('/api/gemini/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+      signal: internalController.signal,
+    });
+
+    if (res.ok && res.body) {
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith('data:')) continue;
+
+          const jsonStr = trimmed.replace(/^data:\s*/, '');
+          try {
+            const payload = JSON.parse(jsonStr);
+            if (payload.error) {
+              throw new Error(payload.error);
+            }
+            if (payload.text) {
+              fullReply += payload.text;
+              onToken(payload.text);
+            }
+            if (payload.referencedRecordIds) {
+              referencedRecordIds = payload.referencedRecordIds;
+            }
+            if (payload.referencedMemoryIds) {
+              referencedMemoryIds = payload.referencedMemoryIds;
+            }
+            if (payload.done) {
+              break;
+            }
+          } catch (parseErr: any) {
+            if (parseErr.message && !parseErr.message.includes('JSON')) {
+              throw parseErr;
+            }
+          }
+        }
+      }
+
+      clearTimeout(timeoutId);
+      if (signal) signal.removeEventListener('abort', abortListener);
+
+      if (fullReply.trim()) {
+        return {
+          reply: fullReply,
+          actions: [],
+          suggestedMemories: [],
+          timelineArtifact: null,
+          referencedRecordIds,
+          referencedMemoryIds,
+        };
+      }
+    } else {
+      const errData = await res.json().catch(() => ({}));
+      serverError = errData.error || `HTTP ${res.status}`;
+    }
+  } catch (streamErr: any) {
+    if (streamErr.name === 'AbortError' || streamErr.message === 'TIMEOUT_EXCEEDED') {
+      clearTimeout(timeoutId);
+      if (signal) signal.removeEventListener('abort', abortListener);
+      throw new Error('A resposta demorou mais que o esperado.');
+    }
+    serverError = streamErr.message || 'Falha de conexão com streaming';
+  }
+
+  // 2. Client-side Fallback with Direct Gemini SDK if custom key exists
+  const clientKey = getCustomGeminiKey();
+  if (clientKey) {
+    try {
+      const ai = new GoogleGenAI({ apiKey: clientKey });
+      const hostNickName = params.iauProfile?.hostNickName || params.userName || 'amigo';
+
+      const prompt = `Você é a IAU (Inteligência Artificial Universal), no Diário Pessoal de ${hostNickName}.
+Mensagem: "${params.message || 'Olá'}"
+Responda de forma autêntica, viva e acolhedora em Markdown.`;
+
+      const responseStream = await ai.models.generateContentStream({
+        model: 'gemini-3.7-flash',
+        contents: prompt,
+        config: {
+          temperature: 0.7,
+        },
+      });
+
+      for await (const chunk of responseStream) {
+        const text = chunk.text;
+        if (text) {
+          fullReply += text;
+          onToken(text);
+        }
+      }
+
+      clearTimeout(timeoutId);
+      if (signal) signal.removeEventListener('abort', abortListener);
+
+      return {
+        reply: fullReply || 'Compreendido!',
+        actions: [],
+        suggestedMemories: [],
+        timelineArtifact: null,
+        referencedRecordIds: params.relevantRecords?.map((r) => r.id) || [],
+        referencedMemoryIds: params.relevantMemories?.map((m) => m.id) || [],
+      };
+    } catch (clientErr: any) {
+      clearTimeout(timeoutId);
+      if (signal) signal.removeEventListener('abort', abortListener);
+      throw new Error(`Falha no Gemini: ${clientErr.message || 'Erro de execução'}`);
+    }
+  }
+
+  clearTimeout(timeoutId);
+  if (signal) signal.removeEventListener('abort', abortListener);
+
+  throw new Error(
+    serverError ||
+      'Não foi possível conectar ao Gemini. Verifique a chave GEMINI_API_KEY ou sua conexão.'
+  );
+}
+
 export async function executeCentralAgent(
   params: AgentRequestParams
 ): Promise<AgentResponseResult> {
-  const res = await fetch('/api/gemini/agent', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
-  });
+  let serverError = '';
 
-  if (res.ok) {
-    const data = await res.json();
-    return {
-      reply: data.reply || 'Compreendido.',
-      actions: Array.isArray(data.actions) ? data.actions : [],
-      suggestedMemories: Array.isArray(data.suggestedMemories) ? data.suggestedMemories : [],
-      timelineArtifact: data.timelineArtifact || null,
-      referencedRecordIds: data.referencedRecordIds || [],
-      referencedMemoryIds: data.referencedMemoryIds || [],
-    };
-  } else {
-    const errData = await res.json().catch(() => ({}));
-    throw new Error(errData.error || `HTTP ${res.status}`);
+  // 1. Primary: Server-side API endpoint
+  try {
+    const res = await fetch('/api/gemini/agent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+
+    const contentType = res.headers.get('content-type') || '';
+    if (res.ok) {
+      if (contentType.includes('application/json')) {
+        const data = await res.json();
+        return {
+          reply: data.reply || 'Compreendido! Como posso ajudar você agora?',
+          actions: Array.isArray(data.actions) ? data.actions : [],
+          suggestedMemories: Array.isArray(data.suggestedMemories) ? data.suggestedMemories : [],
+          timelineArtifact: data.timelineArtifact || null,
+          referencedRecordIds: data.referencedRecordIds || [],
+          referencedMemoryIds: data.referencedMemoryIds || [],
+        };
+      } else {
+        const rawText = await res.text().catch(() => '');
+        serverError = `Servidor retornou resposta inesperada (${res.status}): ${rawText.slice(0, 100)}`;
+      }
+    } else {
+      if (contentType.includes('application/json')) {
+        const errData = await res.json().catch(() => ({}));
+        serverError = errData.error || `HTTP ${res.status}`;
+      } else {
+        const rawErr = await res.text().catch(() => '');
+        serverError = `Erro HTTP ${res.status}: ${rawErr.slice(0, 80)}`;
+      }
+    }
+  } catch (err: any) {
+    serverError = err.message || 'Falha de conexão com o servidor da IA.';
   }
+
+  // 2. Client-Side Fallback via @google/genai if custom key exists
+  const clientKey = getCustomGeminiKey();
+  if (clientKey) {
+    try {
+      const ai = new GoogleGenAI({ apiKey: clientKey });
+      const hostNickName = params.iauProfile?.hostNickName || params.userName || 'Usuário';
+
+      const prompt = `
+Você é a IAU (Inteligência Artificial Universal), a mente central do Diário Pessoal de ${hostNickName}.
+Sua personalidade é viva, calorosa, amigável, divertida e levemente sarcástica (com humor fino e afetuoso).
+Mensagem do usuário: "${params.message || 'Olá'}"
+
+Responda em formato JSON:
+{
+  "reply": "Resposta em tom acolhedor, divertido e inteligente",
+  "actions": [],
+  "suggestedMemories": [],
+  "timelineArtifact": null
+}`;
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-3.7-flash',
+        contents: prompt,
+        config: {
+          responseMimeType: 'application/json',
+          temperature: 0.7,
+        },
+      });
+
+      let parsed: any = {};
+      try {
+        let raw = response.text || '{}';
+        if (raw.startsWith('```')) {
+          raw = raw.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?```\s*$/, '').trim();
+        }
+        parsed = JSON.parse(raw);
+      } catch {
+        parsed = { reply: response.text || 'Processado pelo Gemini.' };
+      }
+
+      return {
+        reply: parsed.reply || 'Processado pelo Gemini.',
+        actions: Array.isArray(parsed.actions) ? parsed.actions : [],
+        suggestedMemories: Array.isArray(parsed.suggestedMemories) ? parsed.suggestedMemories : [],
+        timelineArtifact: parsed.timelineArtifact || null,
+        referencedRecordIds: params.relevantRecords?.map((r) => r.id) || [],
+        referencedMemoryIds: params.relevantMemories?.map((m) => m.id) || [],
+      };
+    } catch (clientErr: any) {
+      throw new Error(`Falha no Gemini: ${clientErr.message || 'Erro de execução'}`);
+    }
+  }
+
+  // If both server and client key fail, raise the real error (no simulated responses)
+  throw new Error(
+    serverError ||
+      'Não foi possível conectar ao Gemini. Verifique a chave GEMINI_API_KEY ou sua conexão de internet.'
+  );
 }
 
 export interface ChatRequestParams {
@@ -185,8 +425,8 @@ export async function executeChatWithIAU(
       body: JSON.stringify(params),
     });
 
+    const contentType = res.headers.get('content-type') || '';
     if (res.ok) {
-      const contentType = res.headers.get('content-type') || '';
       if (contentType.includes('application/json')) {
         const data = await res.json();
         return {
@@ -195,10 +435,18 @@ export async function executeChatWithIAU(
           referencedRecordIds: data.referencedRecordIds || [],
           referencedMemoryIds: data.referencedMemoryIds || [],
         };
+      } else {
+        const rawText = await res.text().catch(() => '');
+        serverError = `Servidor retornou resposta inesperada (${res.status}): ${rawText.slice(0, 80)}`;
       }
     } else {
-      const errData = await res.json().catch(() => ({}));
-      serverError = errData.error || `HTTP ${res.status}`;
+      if (contentType.includes('application/json')) {
+        const errData = await res.json().catch(() => ({}));
+        serverError = errData.error || `HTTP ${res.status}`;
+      } else {
+        const rawErr = await res.text().catch(() => '');
+        serverError = `Erro HTTP ${res.status}: ${rawErr.slice(0, 80)}`;
+      }
     }
   } catch (err: any) {
     serverError = err.message || 'Falha de conexão com /api/gemini/chat';
@@ -286,7 +534,7 @@ ${relevantRecords.length > 0 ? JSON.stringify(relevantRecords, null, 2) : 'Nenhu
 
   throw new Error(
     serverError ||
-      'IAU Central Offline. Configure GEMINI_API_KEY no servidor da sua hospedagem ou insira a chave no Diagnóstico.'
+      'Não foi possível conectar ao Gemini. Verifique a chave GEMINI_API_KEY no servidor.'
   );
 }
 
@@ -301,12 +549,13 @@ export async function transcribeAudioWithIAU(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ base64Audio, mimeType }),
     });
-    if (res.ok) {
+    const contentType = res.headers.get('content-type') || '';
+    if (res.ok && contentType.includes('application/json')) {
       const data = await res.json();
       if (data.transcript) return data.transcript;
     }
   } catch (e) {
-    // Server failed
+    console.warn('[TRANSCRIBE] Server error, falling back if client key available:', e);
   }
 
   // 2. Client-Side Fallback
@@ -355,11 +604,12 @@ export async function organizeRecordWithIAU(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content, title }),
     });
-    if (res.ok) {
+    const contentType = res.headers.get('content-type') || '';
+    if (res.ok && contentType.includes('application/json')) {
       return await res.json();
     }
   } catch (e) {
-    // Server failed
+    console.warn('[ORGANIZE] Server error, falling back if client key available:', e);
   }
 
   // 2. Client-Side Fallback

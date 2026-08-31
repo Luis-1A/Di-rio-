@@ -53,8 +53,8 @@ export function findRelevantRecords(
   const tokens = extractSearchTokens(queryText);
 
   if (tokens.length === 0) {
-    // If no query terms, return the most recent 3 records
-    return activeRecords.slice(0, 3);
+    // For casual short messages or greetings with no specific search terms, do not inject arbitrary records
+    return [];
   }
 
   const scored: ScoredRecord[] = [];
@@ -80,13 +80,7 @@ export function findRelevantRecords(
       if (transcriptsNorm.includes(token)) score += 5;
     }
 
-    // Temporal bonus: give small weight to recent records
-    const recordAgeDays =
-      (Date.now() - new Date(rec.createdAt).getTime()) / (1000 * 3600 * 24);
-    if (recordAgeDays < 7) score += 2;
-    else if (recordAgeDays < 30) score += 1;
-
-    if (score > 0) {
+    if (score >= 6) {
       scored.push({
         record: rec,
         score,
@@ -105,7 +99,7 @@ export function findRelevantRecords(
 export function findRelevantMemories(
   memoriesOrQuery: MemoryItem[] | string,
   queryOrMemories: string | MemoryItem[],
-  limit: number = 4
+  limit: number = 3
 ): MemoryItem[] {
   let memories: MemoryItem[] = [];
   let queryText = '';
@@ -124,7 +118,8 @@ export function findRelevantMemories(
   const tokens = extractSearchTokens(queryText);
 
   if (tokens.length === 0) {
-    return memories.slice(0, 3);
+    // For casual short messages or greetings, return empty to keep latency near-instant
+    return [];
   }
 
   const scored: ScoredMemory[] = [];

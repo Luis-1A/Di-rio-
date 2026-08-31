@@ -16,7 +16,7 @@ import {
 import { findRelevantRecords, findRelevantMemories } from '../lib/memoryEngine';
 import { VoiceDefenseEngine } from '../lib/voiceDefense';
 import { AudioProcessor, AudioCaptureResult } from '../lib/audioProcessor';
-import { executeCentralAgent, transcribeAudioWithIAU } from '../lib/geminiBridge';
+import { streamCentralAgent, transcribeAudioWithIAU } from '../lib/geminiBridge';
 import {
   Send,
   ChevronLeft,
@@ -33,6 +33,8 @@ import {
   Sparkles,
   AlertTriangle,
   ArrowRight,
+  RotateCcw,
+  Square,
 } from 'lucide-react';
 
 interface ChatViewProps {
@@ -56,6 +58,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
 }) => {
   const [inputText, setInputText] = useState('');
   const [isSending, setIsSending] = useState(false);
+  const [streamingText, setStreamingText] = useState<string>('');
+  const [isStreamingActive, setIsStreamingActive] = useState<boolean>(false);
+  const [streamError, setStreamError] = useState<string | null>(null);
+  const [lastFailedQuery, setLastFailedQuery] = useState<string | null>(null);
+
   const [isRecordingMic, setIsRecordingMic] = useState(false);
   const [micTimer, setMicTimer] = useState('00:00');
   const [isTranscribingVoice, setIsTranscribingVoice] = useState(false);
@@ -83,6 +90,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const audioProcessorRef = useRef<AudioProcessor | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const activeAbortControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     voiceEngineRef.current = new VoiceDefenseEngine({
@@ -114,12 +122,15 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
     return () => {
       voiceEngineRef.current?.destroy();
+      if (activeAbortControllerRef.current) {
+        activeAbortControllerRef.current.abort();
+      }
     };
   }, [iauSettings]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, isSending]);
+  }, [messages, streamingText, isSending]);
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -155,6 +166,16 @@ export const ChatView: React.FC<ChatViewProps> = ({
     setPendingAttachments((prev) => prev.filter((a) => a.id !== id));
   };
 
+  const handleCancelRequest = () => {
+    if (activeAbortControllerRef.current) {
+      activeAbortControllerRef.current.abort();
+      activeAbortControllerRef.current = null;
+    }
+    setIsSending(false);
+    setIsStreamingActive(false);
+    setStreamingText('');
+  };
+
   const handleSendMessage = async (customText?: string) => {
     const textToSend = customText !== undefined ? customText : inputText;
     if (!textToSend.trim() && pendingAttachments.length === 0) return;
@@ -162,79 +183,84 @@ export const ChatView: React.FC<ChatViewProps> = ({
     const currentAttachments = [...pendingAttachments];
     setInputText('');
     setPendingAttachments([]);
+    setStreamError(null);
+    setLastFailedQuery(null);
     setIsSending(true);
+    setIsStreamingActive(true);
+    setStreamingText('');
+
+    const controller = new AbortController();
+    activeAbortControllerRef.current = controller;
+
+    // Asynchronously save user message to Firestore without blocking the AI stream
+    const userMsgPayload: any = {
+      role: 'user',
+      content: textToSend.trim(),
+      operationId: `op_user_${Date.now()}`,
+    };
+    if (currentAttachments.length > 0) {
+      userMsgPayload.attachments = currentAttachments;
+    }
+    saveMessage(user.uid, userMsgPayload).catch((err) => {
+      console.warn('Background save message notice:', err);
+    });
+
+    // Targeted contextual lookup (only if query has actual search tokens)
+    const relevantRecords = findRelevantRecords(records, textToSend, 3);
+    const relevantMemories = findRelevantMemories(memories, textToSend, 3);
 
     try {
-      const userMsgPayload: any = {
-        role: 'user',
-        content: textToSend.trim(),
-        operationId: `op_user_${Date.now()}`,
-      };
-      if (currentAttachments.length > 0) {
-        userMsgPayload.attachments = currentAttachments;
-      }
-      await saveMessage(user.uid, userMsgPayload);
-
-      const relevantRecords = findRelevantRecords(records, textToSend, 6);
-      const relevantMemories = findRelevantMemories(memories, textToSend, 6);
-
-      const data = await executeCentralAgent({
+      const responseData = await streamCentralAgent({
         userId: user.uid,
         userName: user.displayName,
         message: textToSend,
-        history: messages.slice(-10),
+        history: messages.slice(-8).map((m) => ({ role: m.role, content: m.content })),
         relevantRecords,
         relevantMemories,
         iauProfile: iauSettings,
         attachments: currentAttachments,
+        signal: controller.signal,
+        timeoutMs: 22000,
+        onToken: (token) => {
+          setStreamingText((prev) => prev + token);
+        },
       });
 
-      const reply = data.reply || 'Entendido. Processei sua solicitação.';
-      const executedActions = data.actions || [];
-
-      if (
-        data.suggestedMemories &&
-        Array.isArray(data.suggestedMemories) &&
-        data.suggestedMemories.length > 0
-      ) {
-        for (const sm of data.suggestedMemories) {
-          if (sm.title && sm.summary) {
-            await saveMemory(user.uid, {
-              title: sm.title,
-              summary: sm.summary,
-              category: sm.category || 'thought',
-              confidence: sm.confidence || 0.85,
-              sourceType: 'conversation',
-              tags: sm.tags || [],
-            });
-          }
-        }
-      }
+      const finalReply = responseData.reply || streamingText || 'Entendido!';
 
       const assistantMsgPayload: any = {
         role: 'assistant',
-        content: reply,
-        referencedRecordIds: data.referencedRecordIds || [],
-        referencedMemoryIds: data.referencedMemoryIds || [],
+        content: finalReply,
+        referencedRecordIds: responseData.referencedRecordIds || [],
+        referencedMemoryIds: responseData.referencedMemoryIds || [],
         operationId: `op_reply_${Date.now()}`,
       };
-      if (executedActions.length > 0) {
-        assistantMsgPayload.agentActions = executedActions;
-      }
-      if (data.timelineArtifact) {
-        assistantMsgPayload.timelineArtifact = data.timelineArtifact;
-      }
 
       await saveMessage(user.uid, assistantMsgPayload);
     } catch (err: any) {
       console.error('Chat error:', err);
-      await saveMessage(user.uid, {
+      const isTimeout =
+        err.message?.includes('demorou mais') ||
+        err.name === 'AbortError' ||
+        err.message?.includes('TIMEOUT');
+
+      const errorMsg = isTimeout
+        ? 'A resposta demorou mais que o esperado.'
+        : `Não foi possível obter resposta: ${err.message || 'Erro de conexão'}.`;
+
+      setStreamError(errorMsg);
+      setLastFailedQuery(textToSend);
+
+      saveMessage(user.uid, {
         role: 'assistant',
-        content: `Não consegui processar agora: ${err.message || 'Erro de conexão'}.`,
+        content: errorMsg,
         operationId: `op_err_${Date.now()}`,
-      });
+      }).catch(() => {});
     } finally {
       setIsSending(false);
+      setIsStreamingActive(false);
+      setStreamingText('');
+      activeAbortControllerRef.current = null;
     }
   };
 
@@ -293,7 +319,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       />
 
       {/* 1. Header (Screen 3: IA Central • Online) */}
-      <div className="flex items-center justify-between pb-3 border-b border-stone-100">
+      <div className="flex items-center justify-between pb-3 border-b border-stone-100 shrink-0">
         <div className="flex items-center gap-2">
           {onBack && (
             <button
@@ -304,53 +330,61 @@ export const ChatView: React.FC<ChatViewProps> = ({
             </button>
           )}
           <div>
-            <h2 className="text-sm font-semibold text-stone-800 leading-none">IA Central</h2>
+            <div className="flex items-center gap-1.5">
+              <h2 className="text-sm font-semibold text-stone-800 leading-none">IAU Central</h2>
+              <Sparkles className="w-3.5 h-3.5 text-orange-500" />
+            </div>
             <div className="flex items-center gap-1.5 mt-1">
               <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-              <span className="text-[11px] text-stone-500 font-medium">Online</span>
+              <span className="text-[11px] text-stone-500 font-medium">Gemini 3.7 Online</span>
             </div>
           </div>
         </div>
 
-        <button
-          className="w-8 h-8 rounded-full flex items-center justify-center text-stone-400 hover:text-stone-700 hover:bg-stone-100 transition-colors cursor-pointer"
-          title="Opções da IA"
-        >
-          <MoreHorizontal className="w-5 h-5" />
-        </button>
+        {isSending && (
+          <button
+            onClick={handleCancelRequest}
+            className="px-2.5 py-1 rounded-full text-xs font-medium bg-stone-100 hover:bg-stone-200 text-stone-600 transition-colors cursor-pointer"
+            title="Cancelar resposta em andamento"
+          >
+            Cancelar
+          </button>
+        )}
       </div>
 
       {/* 2. Messages List Feed */}
       <div className="flex-1 overflow-y-auto space-y-3.5 pt-3 pb-3 pr-0.5">
         {/* Welcome greeting bubble if no messages */}
-        {messages.length === 0 && (
+        {messages.length === 0 && !isStreamingActive && (
           <div className="flex flex-col items-start space-y-2">
             <div className="bg-white border border-stone-100 rounded-3xl rounded-tl-sm p-4 text-xs sm:text-sm text-stone-800 shadow-xs max-w-[85%]">
               <span className="font-semibold text-stone-900">Oi! 👋</span>
-              <p className="mt-1 text-stone-600">Como posso ajudar você hoje?</p>
+              <p className="mt-1 text-stone-600">Como posso ajudar você hoje no seu diário?</p>
             </div>
 
             {/* Quick Prompts */}
             <div className="flex flex-col gap-2 pt-2 w-full">
               <button
                 onClick={() =>
-                  handleSendMessage('Quero que você crie uma linha do tempo com os momentos mais importantes desse ano.')
+                  handleSendMessage('Oi! Como você pode me ajudar no meu diário?')
                 }
                 className="text-left p-3 rounded-2xl bg-white border border-stone-100 hover:border-orange-200 text-xs text-stone-700 shadow-xs transition-colors cursor-pointer"
               >
-                "Quero que você crie uma linha do tempo com os momentos mais importantes desse ano."
+                "Oi! Como você pode me ajudar no meu diário?"
               </button>
               <button
-                onClick={() => handleSendMessage('Quais foram as ideias que gravei por áudio recentemente?')}
+                onClick={() =>
+                  handleSendMessage('Quero que você crie uma linha do tempo com meus momentos recentes.')
+                }
                 className="text-left p-3 rounded-2xl bg-white border border-stone-100 hover:border-orange-200 text-xs text-stone-700 shadow-xs transition-colors cursor-pointer"
               >
-                "Quais foram as ideias que gravei por áudio recentemente?"
+                "Quero que você crie uma linha do tempo com meus momentos recentes."
               </button>
             </div>
           </div>
         )}
 
-        {/* Message Stream */}
+        {/* Message History Feed */}
         {messages.map((msg) => {
           const isAssistant = msg.role === 'assistant';
 
@@ -481,10 +515,38 @@ export const ChatView: React.FC<ChatViewProps> = ({
           );
         })}
 
-        {isSending && (
-          <div className="flex items-center gap-2 p-3 bg-white border border-stone-100 rounded-2xl w-fit shadow-xs">
-            <Loader2 className="w-4 h-4 animate-spin text-orange-600" />
-            <span className="text-xs text-stone-500">Pensando e organizando...</span>
+        {/* Real-Time Live Streaming Bubble (Zero delay, progressive tokens) */}
+        {isStreamingActive && (
+          <div className="flex flex-col items-start">
+            <div className="max-w-[88%] rounded-3xl p-3.5 text-xs sm:text-sm shadow-xs space-y-2 bg-white border border-orange-200 text-stone-800 rounded-tl-sm animate-in fade-in duration-150">
+              {streamingText ? (
+                <div className="leading-relaxed whitespace-pre-wrap">
+                  {streamingText}
+                  <span className="inline-block w-1.5 h-3.5 bg-orange-500 ml-1 animate-pulse" />
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 py-0.5 text-stone-500">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-orange-600" />
+                  <span className="text-xs">IAU está pensando...</span>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Error / Timeout banner with Retry Action */}
+        {streamError && !isStreamingActive && (
+          <div className="p-3 bg-red-50 border border-red-200 rounded-2xl text-xs text-red-700 flex items-center justify-between gap-2">
+            <span className="truncate">{streamError}</span>
+            {lastFailedQuery && (
+              <button
+                onClick={() => handleSendMessage(lastFailedQuery)}
+                className="px-2.5 py-1 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-semibold flex items-center gap-1 shrink-0 cursor-pointer"
+              >
+                <RotateCcw className="w-3 h-3" />
+                Tentar novamente
+              </button>
+            )}
           </div>
         )}
 
@@ -493,7 +555,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
       {/* Pending Attachments preview before sending */}
       {pendingAttachments.length > 0 && (
-        <div className="mb-2 p-2 rounded-2xl bg-white border border-stone-200 shadow-xs flex flex-wrap gap-1.5">
+        <div className="mb-2 p-2 rounded-2xl bg-white border border-stone-200 shadow-xs flex flex-wrap gap-1.5 shrink-0">
           {pendingAttachments.map((att) => (
             <div
               key={att.id}
@@ -514,7 +576,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
       {/* Recording Voice banner */}
       {isRecordingMic && (
-        <div className="mb-2 p-2.5 rounded-2xl bg-orange-50 border border-orange-200 text-orange-900 text-xs flex items-center justify-between">
+        <div className="mb-2 p-2.5 rounded-2xl bg-orange-50 border border-orange-200 text-orange-900 text-xs flex items-center justify-between shrink-0">
           <div className="flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
             <span>Gravando por voz: {micTimer}</span>
@@ -528,13 +590,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
         </div>
       )}
 
-      {/* 3. Fixed Bottom Input Bar (Screen 3) */}
+      {/* 3. Non-Blocking Bottom Input Bar (Screen 3) */}
       <form
         onSubmit={(e) => {
           e.preventDefault();
           handleSendMessage();
         }}
-        className="flex items-center gap-1.5 bg-white border border-stone-200/80 rounded-full px-2 py-1.5 shadow-xs"
+        className="flex items-center gap-1.5 bg-white border border-stone-200/80 rounded-full px-2 py-1.5 shadow-xs shrink-0"
       >
         {/* Attachment button */}
         <button
@@ -550,7 +612,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         <button
           type="button"
           onClick={handleToggleMic}
-          disabled={isSending}
+          disabled={isTranscribingVoice}
           title="Falar por áudio"
           className={`w-8 h-8 rounded-full flex items-center justify-center transition-colors cursor-pointer ${
             isRecordingMic
@@ -561,28 +623,35 @@ export const ChatView: React.FC<ChatViewProps> = ({
           <Mic className="w-4 h-4" />
         </button>
 
-        {/* Text Input */}
+        {/* Text Input - NEVER blocked while browsing or reading */}
         <input
           type="text"
           value={inputText}
           onChange={(e) => setInputText(e.target.value)}
           placeholder="Digite sua mensagem..."
-          disabled={isSending || isRecordingMic}
+          disabled={isRecordingMic}
           className="flex-1 bg-transparent px-2 py-1 text-stone-800 placeholder:text-stone-400 text-xs sm:text-sm focus:outline-hidden"
         />
 
-        {/* Send Button (Orange Circle) */}
-        <button
-          type="submit"
-          disabled={(!inputText.trim() && pendingAttachments.length === 0) || isSending}
-          className="w-9 h-9 rounded-full bg-orange-600 hover:bg-orange-700 disabled:opacity-40 text-white flex items-center justify-center shadow-md shadow-orange-600/20 transition-transform active:scale-95 cursor-pointer shrink-0"
-        >
-          {isSending ? (
-            <Loader2 className="w-4 h-4 animate-spin" />
-          ) : (
+        {/* Send / Stop Button */}
+        {isSending ? (
+          <button
+            type="button"
+            onClick={handleCancelRequest}
+            title="Parar resposta"
+            className="w-9 h-9 rounded-full bg-stone-700 hover:bg-stone-800 text-white flex items-center justify-center shadow-md transition-transform active:scale-95 cursor-pointer shrink-0"
+          >
+            <Square className="w-3.5 h-3.5 fill-white text-white" />
+          </button>
+        ) : (
+          <button
+            type="submit"
+            disabled={!inputText.trim() && pendingAttachments.length === 0}
+            className="w-9 h-9 rounded-full bg-orange-600 hover:bg-orange-700 disabled:opacity-40 text-white flex items-center justify-center shadow-md shadow-orange-600/20 transition-transform active:scale-95 cursor-pointer shrink-0"
+          >
             <Send className="w-4 h-4 fill-white ml-0.5" />
-          )}
-        </button>
+          </button>
+        )}
       </form>
     </div>
   );
