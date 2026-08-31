@@ -1,6 +1,6 @@
 {
   "name": "Diário Pessoal",
-  "description": "Arquivo digital pessoal com memória de longo prazo e inteligência IAU Central conectada ao Firebase e Gemini.",
+  "description": "Arquivo digital pessoal com memória de longo prazo e inteligência autônoma IAU nativa com aprendizado contínuo.",
   "requestFramePermissions": [
     "camera",
     "microphone"
