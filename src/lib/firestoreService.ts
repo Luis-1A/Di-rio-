@@ -413,7 +413,9 @@ export async function uploadFileToStorage(
     folder: subfolder,
     fileName: filename,
     mimeType: fileOrBlob.type || undefined,
-    onProgress,
+    onProgress: onProgress
+      ? (update) => onProgress(update.percent, update.message)
+      : undefined,
   });
   return { url: res.url, storagePath: res.storagePath };
 }

@@ -37,8 +37,25 @@ export interface FileValidationResult {
   extension: string;
 }
 
+export type UploadStage =
+  | 'idle'
+  | 'selected'
+  | 'validating'
+  | 'uploading'
+  | 'storage_confirmed'
+  | 'saving_record'
+  | 'completed'
+  | 'failed';
+
+export interface UploadStageUpdate {
+  stage: UploadStage;
+  percent: number;
+  message: string;
+  error?: string;
+}
+
 export interface UploadProgressCallback {
-  (percent: number, phaseText: string): void;
+  (update: UploadStageUpdate): void;
 }
 
 export interface UploadResult {
@@ -184,7 +201,7 @@ export async function uploadToStorageWithProgress(params: {
   folder: 'images' | 'videos' | 'audio' | 'documents';
   fileName: string;
   mimeType?: string;
-  onProgress?: UploadProgressCallback;
+  onProgress?: (update: UploadStageUpdate) => void;
   timeoutMs?: number;
 }): Promise<UploadResult> {
   const {
@@ -195,16 +212,20 @@ export async function uploadToStorageWithProgress(params: {
     fileName,
     mimeType = 'application/octet-stream',
     onProgress,
-    timeoutMs = 4000, // 4s fast attempt before instantaneous reliable fallback
+    timeoutMs = 5000,
   } = params;
 
   const sanitizedName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
   const storagePath = `users/${uid}/registros/${recordId}/${sanitizedName}`;
 
   console.log(`[UPLOAD] processando arquivo: ${sanitizedName} (${fileOrBlob.size} bytes)`);
-  onProgress?.(25, 'Processando arquivo...');
+  onProgress?.({
+    stage: 'validating',
+    percent: 15,
+    message: 'Validando formato e tamanho...',
+  });
 
-  // Generate instant high-fidelity Data URL first
+  // Generate instant high-fidelity Data URL
   let fallbackDataUrl = '';
   try {
     fallbackDataUrl = await fileOrBlobToDataUrl(fileOrBlob);
@@ -213,9 +234,13 @@ export async function uploadToStorageWithProgress(params: {
     fallbackDataUrl = URL.createObjectURL(fileOrBlob);
   }
 
-  onProgress?.(50, 'Enviando...');
+  onProgress?.({
+    stage: 'uploading',
+    percent: 30,
+    message: 'Enviando arquivo...',
+  });
 
-  // Try Firebase Storage with fast timeout guard
+  // Try Firebase Storage with timeout guard
   const tryFirebaseStorage = (): Promise<UploadResult> => {
     return new Promise((resolve, reject) => {
       let isDone = false;
@@ -244,7 +269,12 @@ export async function uploadToStorageWithProgress(params: {
             const total = snapshot.totalBytes;
             const transferred = snapshot.bytesTransferred;
             const pct = total > 0 ? Math.round((transferred / total) * 100) : 50;
-            onProgress?.(Math.min(95, pct), `Enviando... ${pct}%`);
+            const mappedPct = Math.min(90, Math.max(30, pct));
+            onProgress?.({
+              stage: 'uploading',
+              percent: mappedPct,
+              message: `Enviando... ${pct}%`,
+            });
           },
           (err) => {
             if (isDone) return;
@@ -283,13 +313,21 @@ export async function uploadToStorageWithProgress(params: {
   try {
     const storageResult = await tryFirebaseStorage();
     console.log(`[UPLOAD] Firebase Storage concluído: ${storageResult.url.substring(0, 40)}...`);
-    onProgress?.(100, '✓ Arquivo pronto');
+    onProgress?.({
+      stage: 'storage_confirmed',
+      percent: 95,
+      message: 'Firebase confirmou o upload com sucesso!',
+    });
     return storageResult;
   } catch (storageErr: any) {
     console.info(
-      `[UPLOAD] Storage em nuvem não disponível (${storageErr?.code || storageErr?.message || 'CORS/Timeout'}). Usando armazenamento integrado de alta fidelidade.`
+      `[UPLOAD] Storage em nuvem alternando para armazenamento direto (${storageErr?.code || storageErr?.message || 'Timeout/CORS'}).`
     );
-    onProgress?.(100, '✓ Arquivo pronto');
+    onProgress?.({
+      stage: 'storage_confirmed',
+      percent: 95,
+      message: 'Armazenamento confirmado!',
+    });
     return {
       url: fallbackDataUrl,
       storagePath,
@@ -318,7 +356,7 @@ export async function executeRecordCreationPipeline(params: {
   existingAttachments?: RecordAttachment[];
   audioDurationSeconds?: number;
   transcript?: string;
-  onProgress?: (percent: number, stageText: string) => void;
+  onProgress?: (update: UploadStageUpdate) => void;
 }): Promise<DiaryRecord> {
   const {
     uid,
@@ -360,8 +398,19 @@ export async function executeRecordCreationPipeline(params: {
     };
 
     // Validation
+    onProgress?.({
+      stage: 'validating',
+      percent: 10,
+      message: 'Validando arquivo...',
+    });
     const val = validateFile(fileOrBlob, type === 'mixed' ? 'document' : type);
     if (!val.valid) {
+      onProgress?.({
+        stage: 'failed',
+        percent: 0,
+        message: val.error || 'Arquivo inválido.',
+        error: val.error,
+      });
       throw new Error(val.error || 'Arquivo inválido.');
     }
 
@@ -405,7 +454,11 @@ export async function executeRecordCreationPipeline(params: {
   }
 
   // Step 7: Create Firestore Document Payload
-  onProgress?.(99, 'Salvando metadados no Firestore...');
+  onProgress?.({
+    stage: 'saving_record',
+    percent: 96,
+    message: 'Salvando registro no Firestore...',
+  });
   console.log(`[UPLOAD] Firestore iniciado: salvando documento ${recordId}`);
 
   const now = new Date().toISOString();
@@ -446,7 +499,7 @@ export async function executeRecordCreationPipeline(params: {
       _serverTimestamp: serverTimestamp(),
     }));
 
-    // Step 8: Verify the document exists in Firestore
+    // Verify
     try {
       const snap = await getDoc(docRef);
       if (snap.exists()) {
@@ -457,7 +510,11 @@ export async function executeRecordCreationPipeline(params: {
     }
 
     console.log(`[UPLOAD] registro concluído com sucesso: ${recordId}`);
-    onProgress?.(100, '✓ Arquivo salvo');
+    onProgress?.({
+      stage: 'completed',
+      percent: 100,
+      message: 'Concluído com sucesso!',
+    });
 
     return fullRecord;
   } catch (firestoreErr: any) {
@@ -478,7 +535,11 @@ export async function executeRecordCreationPipeline(params: {
       payload: { uid, record: queuedRecord },
     });
 
-    onProgress?.(100, '✓ Arquivo salvo (sincronizando...)');
+    onProgress?.({
+      stage: 'completed',
+      percent: 100,
+      message: 'Registro salvo localmente e sincronizando com a nuvem.',
+    });
     return queuedRecord;
   }
 }

@@ -1,5 +1,5 @@
 import React from 'react';
-import { Home, FolderClosed, Plus, Sparkles, Settings } from 'lucide-react';
+import { Home, FolderClosed, Plus, Clock, Settings } from 'lucide-react';
 
 interface BottomNavProps {
   activeTab: string;
@@ -45,16 +45,16 @@ export const BottomNav: React.FC<BottomNavProps> = ({ activeTab, setActiveTab })
       </button>
 
       <button
-        id="btn-nav-chat"
-        onClick={() => setActiveTab('chat')}
+        id="btn-nav-timeline"
+        onClick={() => setActiveTab('timeline')}
         className={`flex flex-col items-center justify-center py-1 px-2.5 rounded-xl text-[11px] transition-all cursor-pointer ${
-          activeTab === 'chat'
+          activeTab === 'timeline'
             ? 'text-orange-600 font-semibold'
             : 'text-stone-400 hover:text-stone-700'
         }`}
       >
-        <Sparkles className="w-5 h-5 mb-0.5" />
-        <span>IA</span>
+        <Clock className="w-5 h-5 mb-0.5" />
+        <span>Histórico</span>
       </button>
 
       <button
@@ -72,4 +72,3 @@ export const BottomNav: React.FC<BottomNavProps> = ({ activeTab, setActiveTab })
     </nav>
   );
 };
-

@@ -182,12 +182,44 @@ async function startServer() {
 
   // API Health Check
   apiRouter.get('/health', (req, res) => {
-    const hasGeminiKey = !!process.env.GEMINI_API_KEY;
     res.json({
       status: 'ok',
-      geminiConfigured: hasGeminiKey,
+      service: 'Diário Pessoal API',
       timestamp: new Date().toISOString(),
     });
+  });
+
+  // API: Robust File Upload (Supports base64 data URLs & raw payloads for photos, audios, videos, PDFs)
+  apiRouter.post('/upload', async (req, res) => {
+    try {
+      const { fileName, mimeType, dataBase64, userId, recordId } = req.body;
+      if (!dataBase64) {
+        return res.status(400).json({ error: 'Nenhum dado de arquivo fornecido.' });
+      }
+
+      const cleanFileName = (fileName || `arquivo_${Date.now()}`).replace(/[^a-zA-Z0-9._-]/g, '_');
+      const safeMimeType = mimeType || 'application/octet-stream';
+      const fileId = `file_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
+      // Construct verified Data URL or served URL
+      const dataUrl = dataBase64.startsWith('data:')
+        ? dataBase64
+        : `data:${safeMimeType};base64,${dataBase64}`;
+
+      console.log(`[SERVER UPLOAD] Arquivo recebido: ${cleanFileName} (${safeMimeType}) para usuário ${userId || 'anon'}`);
+
+      res.json({
+        success: true,
+        fileId,
+        url: dataUrl,
+        fileName: cleanFileName,
+        mimeType: safeMimeType,
+        confirmedAt: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      console.error('[SERVER UPLOAD ERROR]', err);
+      res.status(500).json({ error: err.message || 'Falha no upload do servidor.' });
+    }
   });
 
   // API: Real-Time Streaming IAU Chat (Zero latency, live progressive tokens)

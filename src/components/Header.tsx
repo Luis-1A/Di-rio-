@@ -6,11 +6,11 @@ import { logoutUser } from '../lib/authService';
 import {
   BookOpen,
   LogOut,
-  Sparkles,
   WifiOff,
   RefreshCw,
   Search,
   Sliders,
+  CheckCircle2,
 } from 'lucide-react';
 
 interface HeaderProps {
@@ -67,13 +67,15 @@ export const Header: React.FC<HeaderProps> = ({
     }
   };
 
-  const pendingCount = queueItems.filter((q) => q.status === 'pending' || q.status === 'processing').length;
+  const pendingCount = queueItems.filter(
+    (q) => q.status === 'pending' || q.status === 'processing'
+  ).length;
   const failedCount = queueItems.filter((q) => q.status === 'failed').length;
 
   const renderStatus = () => {
     if (!isOnline) {
       return (
-        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-stone-100 text-stone-600 border border-stone-200">
+        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-stone-100 text-stone-600 border border-stone-200">
           <WifiOff className="w-3 h-3 text-amber-600" />
           <span>Offline</span>
         </span>
@@ -82,7 +84,7 @@ export const Header: React.FC<HeaderProps> = ({
 
     if (isFlushing) {
       return (
-        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-50 text-amber-800 border border-amber-200">
+        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-amber-50 text-amber-800 border border-amber-200">
           <RefreshCw className="w-3 h-3 text-amber-600 animate-spin" />
           <span>Sincronizando</span>
         </span>
@@ -93,7 +95,7 @@ export const Header: React.FC<HeaderProps> = ({
       return (
         <button
           onClick={handleManualSync}
-          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-red-50 text-red-700 border border-red-200 hover:bg-red-100 transition-colors cursor-pointer"
+          className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-red-50 text-red-700 border border-red-200 hover:bg-red-100 transition-colors cursor-pointer"
           title="Tocar para enviar registros pendentes"
         >
           <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
@@ -106,7 +108,7 @@ export const Header: React.FC<HeaderProps> = ({
       return (
         <button
           onClick={handleManualSync}
-          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-50 text-amber-800 border border-amber-200 hover:bg-amber-100 transition-colors cursor-pointer"
+          className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-amber-50 text-amber-800 border border-amber-200 hover:bg-amber-100 transition-colors cursor-pointer"
         >
           <RefreshCw className="w-3 h-3 text-amber-600 animate-spin" />
           <span>Sincronizando</span>
@@ -115,15 +117,15 @@ export const Header: React.FC<HeaderProps> = ({
     }
 
     return (
-      <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-200/80">
-        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-        <span>IA disponível</span>
+      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-emerald-50 text-emerald-700 border border-emerald-200/80">
+        <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+        <span>Sincronizado</span>
       </span>
     );
   };
 
   return (
-    <header className="sticky top-0 z-30 bg-[#FAF8F5]/90 backdrop-blur-md px-4 lg:px-8 py-3.5 transition-all">
+    <header className="sticky top-0 z-30 bg-[#FAF8F5]/90 backdrop-blur-md px-4 lg:px-8 py-3.5 transition-all border-b border-stone-200/40">
       <div className="max-w-3xl mx-auto flex items-center justify-between gap-4">
         {/* Brand */}
         <div className="flex items-center gap-3">
@@ -135,7 +137,7 @@ export const Header: React.FC<HeaderProps> = ({
               <BookOpen className="w-4 h-4" />
             </div>
             <div>
-              <div className="text-base font-semibold text-stone-800 leading-none">
+              <div className="text-base font-bold text-stone-800 leading-none">
                 Diário Pessoal
               </div>
             </div>
@@ -175,15 +177,14 @@ export const Header: React.FC<HeaderProps> = ({
             + Novo
           </button>
           <button
-            onClick={() => setActiveTab('chat')}
-            className={`px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 ${
-              activeTab === 'chat'
+            onClick={() => setActiveTab('timeline')}
+            className={`px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
+              activeTab === 'timeline'
                 ? 'bg-white text-stone-900 font-semibold shadow-xs'
                 : 'text-stone-600 hover:text-stone-900'
             }`}
           >
-            <Sparkles className="w-3.5 h-3.5 text-orange-600" />
-            <span>IA</span>
+            Histórico
           </button>
           <button
             onClick={() => setActiveTab('profile')}

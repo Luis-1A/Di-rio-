@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import { DiaryRecord, MemoryItem, UserProfile } from '../types';
 import {
-  Sparkles,
   Plus,
   FileText,
   Image as ImageIcon,
@@ -12,38 +11,50 @@ import {
   Pause,
   ArrowRight,
   Clock,
-  ExternalLink,
+  Eye,
+  FolderClosed,
+  CheckCircle2,
+  Calendar,
 } from 'lucide-react';
 
 interface DashboardViewProps {
   user: UserProfile;
   records: DiaryRecord[];
   memories: MemoryItem[];
-  onNewRecord: () => void;
-  onOpenChat: () => void;
+  onNewRecord: (type?: 'text' | 'photo' | 'audio' | 'video' | 'document') => void;
   onSelectRecord: (record: DiaryRecord) => void;
   onViewAllRecords: () => void;
-  onViewAllMemories: () => void;
+  onOpenPdf?: (url: string, title: string, fileName?: string, size?: number) => void;
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
   user,
   records,
   onNewRecord,
-  onOpenChat,
   onSelectRecord,
   onViewAllRecords,
+  onOpenPdf,
 }) => {
   const activeRecords = records.filter((r) => !r.isDeleted);
   const recentRecords = activeRecords.slice(0, 10);
   const [playingAudioId, setPlayingAudioId] = useState<string | null>(null);
+  const audioInstancesRef = React.useRef<Record<string, HTMLAudioElement>>({});
+
+  const stats = {
+    total: activeRecords.length,
+    photos: activeRecords.filter((r) => r.type === 'photo').length,
+    audios: activeRecords.filter((r) => r.type === 'audio').length,
+    videos: activeRecords.filter((r) => r.type === 'video').length,
+    docs: activeRecords.filter((r) => r.type === 'document').length,
+    texts: activeRecords.filter((r) => r.type === 'text').length,
+  };
 
   const getRecordBadge = (type: string) => {
     switch (type) {
       case 'photo':
         return (
-          <span className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-700 bg-amber-50 px-2 py-0.5 rounded-md border border-amber-200/60">
-            <ImageIcon className="w-3 h-3 text-amber-600" />
+          <span className="inline-flex items-center gap-1 text-[11px] font-medium text-sky-700 bg-sky-50 px-2 py-0.5 rounded-md border border-sky-200/60">
+            <ImageIcon className="w-3 h-3 text-sky-600" />
             <span>Foto</span>
           </span>
         );
@@ -56,16 +67,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         );
       case 'video':
         return (
-          <span className="inline-flex items-center gap-1 text-[11px] font-medium text-rose-700 bg-rose-50 px-2 py-0.5 rounded-md border border-rose-200/60">
-            <Video className="w-3 h-3 text-rose-600" />
+          <span className="inline-flex items-center gap-1 text-[11px] font-medium text-purple-700 bg-purple-50 px-2 py-0.5 rounded-md border border-purple-200/60">
+            <Video className="w-3 h-3 text-purple-600" />
             <span>Vídeo</span>
           </span>
         );
       case 'document':
         return (
-          <span className="inline-flex items-center gap-1 text-[11px] font-medium text-blue-700 bg-blue-50 px-2 py-0.5 rounded-md border border-blue-200/60">
-            <File className="w-3 h-3 text-blue-600" />
-            <span>Arquivo</span>
+          <span className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-700 bg-amber-50 px-2 py-0.5 rounded-md border border-amber-200/60">
+            <File className="w-3 h-3 text-amber-600" />
+            <span>PDF / Arquivo</span>
           </span>
         );
       default:
@@ -82,7 +93,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     try {
       const now = new Date();
       const created = new Date(createdAt || dateStr);
-      
+
       const isToday =
         now.getFullYear() === created.getFullYear() &&
         now.getMonth() === created.getMonth() &&
@@ -103,10 +114,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       if (isToday) return `Hoje, ${timeStr}`;
       if (isYesterday) return `Ontem, ${timeStr}`;
 
-      return created.toLocaleDateString('pt-BR', {
-        day: 'numeric',
-        month: 'short',
-      }) + `, ${timeStr}`;
+      return (
+        created.toLocaleDateString('pt-BR', {
+          day: 'numeric',
+          month: 'short',
+        }) + `, ${timeStr}`
+      );
     } catch {
       return dateStr || '';
     }
@@ -115,79 +128,150 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const toggleAudio = (e: React.MouseEvent, recordId: string, audioUrl?: string) => {
     e.stopPropagation();
     if (!audioUrl) return;
+
     if (playingAudioId === recordId) {
+      if (audioInstancesRef.current[recordId]) {
+        audioInstancesRef.current[recordId].pause();
+      }
       setPlayingAudioId(null);
     } else {
+      // Pause any existing
+      Object.values(audioInstancesRef.current).forEach((a) => {
+        if (a instanceof HTMLAudioElement) a.pause();
+      });
+
+      if (!audioInstancesRef.current[recordId]) {
+        audioInstancesRef.current[recordId] = new Audio(audioUrl);
+        audioInstancesRef.current[recordId].onended = () => setPlayingAudioId(null);
+      }
+
+      audioInstancesRef.current[recordId].play().catch(() => {});
       setPlayingAudioId(recordId);
-      const audio = new Audio(audioUrl);
-      audio.play().catch(() => {});
-      audio.onended = () => setPlayingAudioId(null);
     }
   };
 
   return (
-    <div id="dashboard-feed" className="max-w-md md:max-w-lg mx-auto px-4 py-4 space-y-5">
-      {/* 1. IA Central Card (Top) */}
-      <div className="bg-white border border-stone-100 rounded-3xl p-5 shadow-[0_2px_12px_rgba(0,0,0,0.03)] relative overflow-hidden">
-        <div className="flex items-start gap-3 mb-2">
-          <div className="w-6 h-6 rounded-full bg-orange-50 flex items-center justify-center text-orange-500 mt-0.5">
-            <Sparkles className="w-3.5 h-3.5" />
-          </div>
+    <div id="dashboard-feed" className="max-w-md md:max-w-xl mx-auto px-4 py-4 space-y-5">
+      {/* 1. Quick Creation Hub & System Status */}
+      <div className="bg-white border border-stone-200/80 rounded-3xl p-5 shadow-[0_2px_12px_rgba(0,0,0,0.03)] space-y-4">
+        <div className="flex items-center justify-between">
           <div>
-            <h2 className="text-sm font-semibold text-stone-800">IA Central</h2>
-            <p className="text-xs text-stone-500 mt-0.5 leading-relaxed">
-              Converse comigo ou encontre algo no seu arquivo.
+            <h2 className="text-base font-bold text-stone-800">
+              Diário & Arquivo Pessoal
+            </h2>
+            <p className="text-xs text-stone-500 mt-0.5">
+              Armazenamento seguro sincronizado em todos os dispositivos
             </p>
+          </div>
+          <div className="flex items-center gap-1.5 bg-emerald-50 text-emerald-700 px-2.5 py-1 rounded-full text-[11px] font-medium border border-emerald-200/80">
+            <CheckCircle2 className="w-3.5 h-3.5" />
+            <span>Nuvem Ativa</span>
           </div>
         </div>
 
-        <div className="mt-3">
+        {/* Quick Action Shortcuts */}
+        <div className="grid grid-cols-5 gap-2 pt-1">
           <button
-            onClick={onOpenChat}
-            className="w-auto px-4 py-2 bg-orange-600 hover:bg-orange-700 active:scale-98 text-white text-xs font-semibold rounded-full shadow-sm transition-all cursor-pointer inline-flex items-center gap-1.5"
+            onClick={() => onNewRecord('text')}
+            className="flex flex-col items-center justify-center p-2.5 rounded-2xl bg-stone-50 hover:bg-orange-50 border border-stone-200/70 hover:border-orange-200 transition-all group cursor-pointer"
           >
-            <span>Conversar com a IA</span>
+            <div className="w-8 h-8 rounded-xl bg-white flex items-center justify-center text-stone-600 group-hover:text-orange-600 shadow-xs mb-1">
+              <FileText className="w-4 h-4" />
+            </div>
+            <span className="text-[11px] font-medium text-stone-700 group-hover:text-orange-700">
+              Texto
+            </span>
+          </button>
+
+          <button
+            onClick={() => onNewRecord('photo')}
+            className="flex flex-col items-center justify-center p-2.5 rounded-2xl bg-stone-50 hover:bg-sky-50 border border-stone-200/70 hover:border-sky-200 transition-all group cursor-pointer"
+          >
+            <div className="w-8 h-8 rounded-xl bg-white flex items-center justify-center text-stone-600 group-hover:text-sky-600 shadow-xs mb-1">
+              <ImageIcon className="w-4 h-4" />
+            </div>
+            <span className="text-[11px] font-medium text-stone-700 group-hover:text-sky-700">
+              Foto
+            </span>
+          </button>
+
+          <button
+            onClick={() => onNewRecord('audio')}
+            className="flex flex-col items-center justify-center p-2.5 rounded-2xl bg-stone-50 hover:bg-emerald-50 border border-stone-200/70 hover:border-emerald-200 transition-all group cursor-pointer"
+          >
+            <div className="w-8 h-8 rounded-xl bg-white flex items-center justify-center text-stone-600 group-hover:text-emerald-600 shadow-xs mb-1">
+              <Mic className="w-4 h-4" />
+            </div>
+            <span className="text-[11px] font-medium text-stone-700 group-hover:text-emerald-700">
+              Áudio
+            </span>
+          </button>
+
+          <button
+            onClick={() => onNewRecord('video')}
+            className="flex flex-col items-center justify-center p-2.5 rounded-2xl bg-stone-50 hover:bg-purple-50 border border-stone-200/70 hover:border-purple-200 transition-all group cursor-pointer"
+          >
+            <div className="w-8 h-8 rounded-xl bg-white flex items-center justify-center text-stone-600 group-hover:text-purple-600 shadow-xs mb-1">
+              <Video className="w-4 h-4" />
+            </div>
+            <span className="text-[11px] font-medium text-stone-700 group-hover:text-purple-700">
+              Vídeo
+            </span>
+          </button>
+
+          <button
+            onClick={() => onNewRecord('document')}
+            className="flex flex-col items-center justify-center p-2.5 rounded-2xl bg-stone-50 hover:bg-amber-50 border border-stone-200/70 hover:border-amber-200 transition-all group cursor-pointer"
+          >
+            <div className="w-8 h-8 rounded-xl bg-white flex items-center justify-center text-stone-600 group-hover:text-amber-600 shadow-xs mb-1">
+              <File className="w-4 h-4" />
+            </div>
+            <span className="text-[11px] font-medium text-stone-700 group-hover:text-amber-700">
+              PDF
+            </span>
           </button>
         </div>
       </div>
 
-      {/* 2. Seus Registros Header */}
+      {/* 2. Registros Recentes Header */}
       <div className="flex items-center justify-between pt-1">
-        <h3 className="text-sm font-semibold text-stone-800 tracking-tight">
-          Seus registros
+        <h3 className="text-sm font-bold text-stone-800 tracking-tight">
+          Registros recentes ({stats.total})
         </h3>
 
         <button
-          onClick={onNewRecord}
-          className="inline-flex items-center gap-1 text-xs font-medium text-orange-600 hover:text-orange-700 bg-orange-50/80 hover:bg-orange-100/70 px-2.5 py-1 rounded-full transition-colors cursor-pointer"
+          onClick={() => onNewRecord()}
+          className="inline-flex items-center gap-1 text-xs font-semibold text-orange-600 hover:text-orange-700 bg-orange-50/80 hover:bg-orange-100/80 px-3 py-1 rounded-full transition-colors cursor-pointer"
         >
-          <Plus className="w-3 h-3 stroke-[2.5]" />
+          <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
           <span>Novo registro</span>
         </button>
       </div>
 
       {/* 3. Feed List */}
       {recentRecords.length === 0 ? (
-        <div className="bg-white border border-stone-100 rounded-3xl p-8 text-center space-y-3 shadow-xs">
-          <div className="w-10 h-10 rounded-full bg-orange-50 text-orange-600 flex items-center justify-center mx-auto">
-            <FileText className="w-5 h-5" />
+        <div className="bg-white border border-stone-200/80 rounded-3xl p-8 text-center space-y-3 shadow-xs">
+          <div className="w-12 h-12 rounded-2xl bg-orange-50 text-orange-600 flex items-center justify-center mx-auto">
+            <FolderClosed className="w-6 h-6" />
           </div>
           <div className="space-y-1">
-            <h4 className="text-sm font-medium text-stone-800">Nenhum registro ainda</h4>
+            <h4 className="text-sm font-semibold text-stone-800">
+              Seu diário está pronto para uso
+            </h4>
             <p className="text-xs text-stone-500 max-w-xs mx-auto">
-              Guarde textos, fotos, áudios, vídeos e arquivos com total facilidade.
+              Guarde textos, fotos, gravações de áudio, vídeos e documentos PDF com confirmação garantida na nuvem.
             </p>
           </div>
           <button
-            onClick={onNewRecord}
-            className="inline-flex items-center gap-1.5 px-4 py-2 bg-orange-600 hover:bg-orange-700 text-white rounded-full text-xs font-medium transition-colors cursor-pointer"
+            onClick={() => onNewRecord()}
+            className="inline-flex items-center gap-1.5 px-4 py-2 bg-orange-600 hover:bg-orange-700 text-white rounded-full text-xs font-semibold transition-colors cursor-pointer shadow-xs"
           >
-            <Plus className="w-3.5 h-3.5" />
+            <Plus className="w-4 h-4" />
             <span>Criar primeiro registro</span>
           </button>
         </div>
       ) : (
-        <div className="space-y-3">
+        <div className="space-y-3.5">
           {recentRecords.map((record) => {
             const photoAttachment = record.attachments?.find(
               (a) => a.type === 'image' || a.mimeType?.startsWith('image/')
@@ -199,14 +283,19 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               (a) => a.type === 'audio' || a.mimeType?.startsWith('audio/')
             );
             const docAttachment = record.attachments?.find(
-              (a) => a.type === 'document' || (!photoAttachment && !videoAttachment && !audioAttachment && a.url)
+              (a) =>
+                a.type === 'document' ||
+                (!photoAttachment && !videoAttachment && !audioAttachment && a.url)
             );
+            const isPDF =
+              docAttachment?.name?.toLowerCase().endsWith('.pdf') ||
+              docAttachment?.mimeType === 'application/pdf';
 
             return (
               <div
                 key={record.id}
                 onClick={() => onSelectRecord(record)}
-                className="bg-white hover:bg-stone-50/50 border border-stone-100/90 rounded-3xl p-4 transition-all duration-150 cursor-pointer shadow-[0_2px_10px_rgba(0,0,0,0.02)] group space-y-2.5"
+                className="bg-white hover:bg-stone-50/60 border border-stone-200/80 rounded-3xl p-4 transition-all duration-150 cursor-pointer shadow-[0_2px_10px_rgba(0,0,0,0.02)] group space-y-3"
               >
                 {/* Top Badge & Date/Time */}
                 <div className="flex items-center justify-between gap-2">
@@ -218,7 +307,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
                 {/* Title */}
                 <h4 className="text-sm font-bold text-stone-800 leading-snug group-hover:text-orange-700 transition-colors">
-                  {record.title || (record.type === 'text' ? 'Anotação' : 'Registro')}
+                  {record.title ||
+                    (record.type === 'text' ? 'Anotação' : 'Registro')}
                 </h4>
 
                 {/* Text Content */}
@@ -228,9 +318,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   </p>
                 )}
 
-                {/* Photo Preview (Banner) */}
+                {/* Photo Preview */}
                 {photoAttachment && (
-                  <div className="rounded-2xl overflow-hidden border border-stone-100 bg-stone-100 aspect-video max-h-48 relative">
+                  <div className="rounded-2xl overflow-hidden border border-stone-200/80 bg-stone-100 aspect-video max-h-56 relative">
                     <img
                       src={photoAttachment.url}
                       alt={record.title || 'Foto'}
@@ -241,30 +331,25 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   </div>
                 )}
 
-                {/* Video Preview (Banner with Play overlay) */}
+                {/* Video Preview */}
                 {videoAttachment && (
-                  <div className="rounded-2xl overflow-hidden border border-stone-100 bg-stone-900 aspect-video max-h-48 relative group/vid">
+                  <div className="rounded-2xl overflow-hidden border border-stone-200/80 bg-stone-900 aspect-video max-h-56 relative group/vid">
                     <video
                       src={videoAttachment.url}
-                      className="w-full h-full object-cover opacity-80"
+                      className="w-full h-full object-contain"
+                      controls
                       preload="metadata"
                     />
-                    <div className="absolute inset-0 flex items-center justify-center">
-                      <div className="w-10 h-10 rounded-full bg-white/30 backdrop-blur-md flex items-center justify-center text-white shadow-md group-hover/vid:scale-110 transition-transform">
-                        <Play className="w-5 h-5 fill-white ml-0.5" />
-                      </div>
-                    </div>
-                    <div className="absolute bottom-2.5 right-2.5 bg-black/60 backdrop-blur-xs text-white text-[10px] font-mono px-1.5 py-0.5 rounded-md">
-                      00:42
-                    </div>
                   </div>
                 )}
 
                 {/* Audio Waveform Player */}
                 {audioAttachment && (
                   <div
-                    onClick={(e) => toggleAudio(e, record.id, audioAttachment.url)}
-                    className="bg-stone-50/80 border border-stone-200/60 rounded-2xl p-2.5 flex items-center gap-3 hover:bg-orange-50/40 transition-colors"
+                    onClick={(e) =>
+                      toggleAudio(e, record.id, audioAttachment.url)
+                    }
+                    className="bg-stone-50 border border-stone-200/80 rounded-2xl p-3 flex items-center gap-3 hover:bg-orange-50/40 transition-colors"
                   >
                     <button
                       type="button"
@@ -280,8 +365,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                     {/* Waveform graphic bars */}
                     <div className="flex-1 flex items-center gap-0.5 h-6">
                       {[
-                        30, 60, 45, 80, 50, 90, 70, 40, 60, 100, 75, 45, 85, 95, 60, 40,
-                        50, 80, 65, 35, 75, 90, 55, 30, 45, 60, 70, 40,
+                        30, 60, 45, 80, 50, 90, 70, 40, 60, 100, 75, 45, 85, 95,
+                        60, 40, 50, 80, 65, 35, 75, 90, 55, 30, 45, 60, 70, 40,
                       ].map((h, i) => (
                         <div
                           key={i}
@@ -296,28 +381,51 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                     </div>
 
                     <span className="text-[11px] font-mono text-stone-500 shrink-0">
-                      01:24
+                      {record.attachments?.[0]?.durationSeconds
+                        ? `00:${record.attachments[0].durationSeconds.toString().padStart(2, '0')}`
+                        : 'Áudio'}
                     </span>
                   </div>
                 )}
 
-                {/* Document File Row */}
+                {/* PDF & Document Row */}
                 {docAttachment && (
-                  <div className="bg-stone-50/80 border border-stone-200/60 rounded-2xl p-2.5 flex items-center gap-2.5">
-                    <div className="w-8 h-8 rounded-xl bg-orange-50 border border-orange-100 flex items-center justify-center text-orange-600 shrink-0">
-                      <File className="w-4 h-4" />
+                  <div className="bg-stone-50 border border-stone-200/80 rounded-2xl p-3 flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="w-9 h-9 rounded-xl bg-orange-50 border border-orange-100 flex items-center justify-center text-orange-600 shrink-0">
+                        <File className="w-4 h-4" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs font-semibold text-stone-800 truncate">
+                          {docAttachment.name || 'Documento em anexo'}
+                        </p>
+                        <p className="text-[10px] text-stone-400">
+                          {isPDF ? 'Documento PDF' : 'Arquivo'} •{' '}
+                          {docAttachment.size
+                            ? `${(docAttachment.size / (1024 * 1024)).toFixed(2)} MB`
+                            : 'Arquivo salvo'}
+                        </p>
+                      </div>
                     </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-xs font-medium text-stone-800 truncate">
-                        {docAttachment.name || 'Arquivo em anexo'}
-                      </p>
-                      <p className="text-[10px] text-stone-400">
-                        {docAttachment.name?.toUpperCase().endsWith('.PDF') ? 'PDF' : 'Documento'} •{' '}
-                        {docAttachment.size
-                          ? `${(docAttachment.size / (1024 * 1024)).toFixed(1)} MB`
-                          : 'Arquivo salvo'}
-                      </p>
-                    </div>
+
+                    {isPDF && onOpenPdf && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onOpenPdf(
+                            docAttachment.url,
+                            record.title || docAttachment.name || 'Documento PDF',
+                            docAttachment.name,
+                            docAttachment.size
+                          );
+                        }}
+                        className="px-3 py-1.5 bg-orange-600 hover:bg-orange-700 text-white rounded-xl text-xs font-semibold transition-colors flex items-center gap-1 cursor-pointer shrink-0 shadow-xs"
+                      >
+                        <Eye className="w-3.5 h-3.5" />
+                        <span>Abrir PDF</span>
+                      </button>
+                    )}
                   </div>
                 )}
               </div>

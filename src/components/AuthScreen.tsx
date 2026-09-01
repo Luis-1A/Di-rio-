@@ -12,7 +12,7 @@ import {
   UserPlus,
   ShieldCheck,
 } from 'lucide-react';
-import { registerUser, loginUser, resetOrChangePassword } from '../lib/authService';
+import { registerUser, loginUser, resetOrChangePassword, loginAsGuest } from '../lib/authService';
 
 type AuthMode = 'login' | 'register' | 'forgot';
 
@@ -405,6 +405,32 @@ export const AuthScreen: React.FC<AuthScreenProps> = () => {
                   <ArrowRight className="w-4 h-4" />
                 </>
               )}
+            </button>
+
+            <div className="relative flex py-1 items-center">
+              <div className="grow border-t border-stone-200"></div>
+              <span className="shrink mx-3 text-xs text-stone-400">ou</span>
+              <div className="grow border-t border-stone-200"></div>
+            </div>
+
+            <button
+              id="btn-guest-login"
+              type="button"
+              disabled={loading}
+              onClick={async () => {
+                setLoading(true);
+                try {
+                  await loginAsGuest('Luis');
+                } catch (e: any) {
+                  setErrorMsg(e.message || 'Erro ao iniciar acesso rápido.');
+                } finally {
+                  setLoading(false);
+                }
+              }}
+              className="w-full bg-stone-100 hover:bg-stone-200 text-stone-700 font-medium py-2.5 px-4 rounded-2xl flex items-center justify-center gap-2 transition-all cursor-pointer text-xs sm:text-sm border border-stone-200/80"
+            >
+              <Sparkles className="w-4 h-4 text-orange-600" />
+              <span>Acessar Diário Imediatamente (Modo Direto)</span>
             </button>
           </form>
 

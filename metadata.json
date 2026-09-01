@@ -1,6 +1,6 @@
 {
   "name": "Diário Pessoal",
-  "description": "Arquivo digital pessoal com memória de longo prazo e inteligência autônoma IAU nativa com aprendizado contínuo.",
+  "description": "Diário e arquivo digital pessoal com armazenamento seguro de fotos, áudios, vídeos, PDFs e anotações.",
   "requestFramePermissions": [
     "camera",
     "microphone"

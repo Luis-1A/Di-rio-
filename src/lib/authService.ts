@@ -359,6 +359,34 @@ export async function resetOrChangePassword(
 }
 
 /**
+ * Instant Guest / Demo Login (No password needed)
+ */
+export async function loginAsGuest(guestName = 'Luis'): Promise<UserProfile> {
+  await ensureFirestoreAuthToken();
+  const guestEmail = `luis.pessoal_${Date.now().toString(36).slice(-4)}@diario.local`;
+  const uid = auth.currentUser?.uid || `usr_guest_${Date.now().toString(36)}`;
+  const now = new Date().toISOString();
+
+  const userProfile: UserProfile = {
+    uid,
+    email: guestEmail,
+    displayName: guestName,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  try {
+    const infoDocRef = doc(db, 'users', uid, 'profile', 'info');
+    await setDoc(infoDocRef, { ...userProfile, _serverTimestamp: serverTimestamp() }, { merge: true });
+  } catch (e) {
+    console.warn('Firestore guest init notice:', e);
+  }
+
+  notifyAuthState(userProfile);
+  return userProfile;
+}
+
+/**
  * Logout the user
  */
 export async function logoutUser(): Promise<void> {
