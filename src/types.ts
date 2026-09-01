@@ -147,6 +147,40 @@ export interface SyncQueueItem {
   errorMessage?: string;
 }
 
+export type UploadQueueStatus =
+  | 'pending_upload'
+  | 'uploading'
+  | 'uploaded'
+  | 'synced'
+  | 'upload_error';
+
+export interface BackgroundUploadItem {
+  id: string; // queue item ID
+  recordId: string;
+  userId: string;
+  type: RecordType;
+  title: string;
+  description?: string;
+  content: string;
+  date: string;
+  time: string;
+  category: string;
+  tags: string[];
+  fileName: string;
+  fileSize: number;
+  mimeType: string;
+  status: UploadQueueStatus;
+  progress: number; // 0 to 100
+  storagePath?: string;
+  downloadUrl?: string;
+  errorMessage?: string;
+  retryCount: number;
+  audioDurationSeconds?: number;
+  transcript?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface SystemHealth {
   auth: 'online' | 'degraded' | 'offline' | 'error';
   firestore: 'online' | 'degraded' | 'offline' | 'error';

@@ -1,13 +1,14 @@
 /**
- * Robust Upload Service for Diário Pessoal
- * Features:
- * - Strict Pre-validation (existence, size, MIME type, extension, permissions)
- * - Real Firebase Storage uploads via uploadBytesResumable with live % progress tracking
- * - Strict Timeout management to eliminate infinite loading spinners
- * - Guaranteed Firestore document creation & server verification
- * - Duplicate submission prevention
- * - Offline queue fallback for poor network connectivity
- * - Standardized diagnostic logs: [UPLOAD] and [UPLOAD ERROR]
+ * Robust, Non-Blocking Upload & Persistence Service for Diário Pessoal
+ *
+ * Architecture:
+ * 1. Storage: Binary media files (photos, videos, audio, documents/PDFs) go to Firebase Storage
+ *    Path: users/{userId}/registros/{recordId}/{fileName}
+ * 2. Firestore: Only lightweight metadata (<10KB) goes to Firestore
+ *    Path: users/{userId}/records/{recordId}
+ * 3. IndexedDB: Local binary cache for instant offline playback & resilient background sync
+ * 4. Realistic Progress Tracking: 0% -> 10% (validation) -> 15-85% (Storage upload) -> 90% (Firestore write) -> 100% (Confirmed)
+ * 5. Strict Firestore Timeouts: Write operations never hang indefinitely
  */
 
 import {
@@ -19,14 +20,13 @@ import {
 import {
   doc,
   setDoc,
-  getDocFromServer,
-  getDoc,
   serverTimestamp,
 } from 'firebase/firestore';
 import { db, storage } from './firebase';
 import { DiaryRecord, RecordAttachment, RecordType } from '../types';
 import { syncQueue, generateOperationId } from './syncQueue';
 import { sanitizeForFirestore } from './firestoreService';
+import { saveLocalMediaBlob } from './idbStorage';
 
 export interface FileValidationResult {
   valid: boolean;
@@ -64,6 +64,7 @@ export interface UploadResult {
   fileName: string;
   fileSize: number;
   mimeType: string;
+  isLocalOnly?: boolean;
 }
 
 /**
@@ -86,10 +87,10 @@ const EXTENSION_MIME_MAP: Record<string, string[]> = {
 };
 
 const MAX_SIZE_MAP: Record<string, number> = {
-  photo: 35 * 1024 * 1024, // 35 MB
-  audio: 60 * 1024 * 1024, // 60 MB
-  video: 120 * 1024 * 1024, // 120 MB
-  document: 50 * 1024 * 1024, // 50 MB
+  photo: 40 * 1024 * 1024, // 40 MB
+  audio: 70 * 1024 * 1024, // 70 MB
+  video: 250 * 1024 * 1024, // 250 MB
+  document: 80 * 1024 * 1024, // 80 MB
   text: 5 * 1024 * 1024,
 };
 
@@ -131,7 +132,7 @@ export function validateFile(
   }
 
   console.log(
-    `[UPLOAD] arquivo selecionado: "${rawName}", tamanho: ${(fileSize / 1024).toFixed(1)} KB, tipo: ${mimeType}`
+    `[UPLOAD] arquivo selecionado: "${rawName}", tamanho: ${(fileSize / (1024 * 1024)).toFixed(2)} MB, tipo: ${mimeType}`
   );
 
   // Check 0-byte corrupted files
@@ -173,26 +174,7 @@ export function validateFile(
 }
 
 /**
- * Convert File or Blob to base64 Data URL reliably
- */
-export async function fileOrBlobToDataUrl(fileOrBlob: File | Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        resolve(reader.result);
-      } else {
-        resolve('');
-      }
-    };
-    reader.onerror = () => reject(new Error('Falha ao processar arquivo para visualização.'));
-    reader.readAsDataURL(fileOrBlob);
-  });
-}
-
-/**
- * 2. Upload file to Firebase Storage with automatic fallback to high-fidelity Data URL
- * Ensures uploads NEVER hang, NEVER freeze the UI, and ALWAYS succeed seamlessly.
+ * 2. Upload file to Firebase Storage with real progress tracking and IndexedDB backup
  */
 export async function uploadToStorageWithProgress(params: {
   uid: string;
@@ -208,139 +190,168 @@ export async function uploadToStorageWithProgress(params: {
     uid,
     recordId,
     fileOrBlob,
-    folder,
     fileName,
     mimeType = 'application/octet-stream',
     onProgress,
-    timeoutMs = 5000,
+    timeoutMs = 60000, // 60s timeout for real network uploads
   } = params;
 
   const sanitizedName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
   const storagePath = `users/${uid}/registros/${recordId}/${sanitizedName}`;
 
-  console.log(`[UPLOAD] processando arquivo: ${sanitizedName} (${fileOrBlob.size} bytes)`);
+  console.log(`[UPLOAD] Iniciando envio do arquivo para Storage: ${storagePath}`);
   onProgress?.({
     stage: 'validating',
-    percent: 15,
-    message: 'Validando formato e tamanho...',
+    percent: 10,
+    message: 'Validando e preparando arquivo...',
   });
 
-  // Generate instant high-fidelity Data URL
-  let fallbackDataUrl = '';
-  try {
-    fallbackDataUrl = await fileOrBlobToDataUrl(fileOrBlob);
-  } catch (dataUrlErr) {
-    console.warn('[UPLOAD] DataURL fallback read notice:', dataUrlErr);
-    fallbackDataUrl = URL.createObjectURL(fileOrBlob);
-  }
+  // Always back up the media blob in local IndexedDB so it's instantly playable offline
+  await saveLocalMediaBlob(recordId, fileOrBlob, sanitizedName, mimeType);
+  const localBlobUrl = URL.createObjectURL(fileOrBlob);
 
   onProgress?.({
     stage: 'uploading',
-    percent: 30,
-    message: 'Enviando arquivo...',
+    percent: 15,
+    message: 'Conectando ao Firebase Storage...',
   });
 
-  // Try Firebase Storage with timeout guard
-  const tryFirebaseStorage = (): Promise<UploadResult> => {
-    return new Promise((resolve, reject) => {
-      let isDone = false;
-      let uploadTask: UploadTask | null = null;
+  return new Promise((resolve) => {
+    let isSettled = false;
+    let uploadTask: UploadTask | null = null;
 
-      const timer = setTimeout(() => {
-        if (!isDone) {
-          isDone = true;
-          try {
-            if (uploadTask) uploadTask.cancel();
-          } catch {}
-          reject(new Error('Firebase Storage timeout'));
-        }
-      }, timeoutMs);
+    // Timeout guard to prevent infinite lockup if network disconnects mid-stream
+    const timer = setTimeout(() => {
+      if (!isSettled) {
+        isSettled = true;
+        console.warn(`[UPLOAD TIMEOUT] Storage demorou mais de ${timeoutMs}ms. Usando armazenamento local temporário.`);
+        try {
+          if (uploadTask) uploadTask.cancel();
+        } catch {}
 
-      try {
-        const sRef = storageRef(storage, storagePath);
-        uploadTask = uploadBytesResumable(sRef, fileOrBlob, {
-          contentType: mimeType,
+        onProgress?.({
+          stage: 'storage_confirmed',
+          percent: 85,
+          message: 'Arquivo salvo localmente. Sincronização em segundo plano.',
         });
 
-        uploadTask.on(
-          'state_changed',
-          (snapshot) => {
-            if (isDone) return;
-            const total = snapshot.totalBytes;
-            const transferred = snapshot.bytesTransferred;
-            const pct = total > 0 ? Math.round((transferred / total) * 100) : 50;
-            const mappedPct = Math.min(90, Math.max(30, pct));
+        resolve({
+          url: localBlobUrl,
+          storagePath,
+          fileName: sanitizedName,
+          fileSize: fileOrBlob.size,
+          mimeType,
+          isLocalOnly: true,
+        });
+      }
+    }, timeoutMs);
+
+    try {
+      const sRef = storageRef(storage, storagePath);
+      uploadTask = uploadBytesResumable(sRef, fileOrBlob, {
+        contentType: mimeType,
+      });
+
+      uploadTask.on(
+        'state_changed',
+        (snapshot) => {
+          if (isSettled) return;
+          const total = snapshot.totalBytes;
+          const transferred = snapshot.bytesTransferred;
+          if (total > 0) {
+            const rawPercent = Math.round((transferred / total) * 100);
+            // Map raw storage progress strictly from 15% to 85%
+            const mappedPercent = Math.min(85, Math.max(15, Math.round(15 + (transferred / total) * 70)));
             onProgress?.({
               stage: 'uploading',
-              percent: mappedPct,
-              message: `Enviando... ${pct}%`,
+              percent: mappedPercent,
+              message: `Enviando para o Firebase Storage (${rawPercent}%)...`,
             });
-          },
-          (err) => {
-            if (isDone) return;
-            isDone = true;
-            clearTimeout(timer);
-            reject(err);
-          },
-          async () => {
-            if (isDone) return;
-            try {
-              const downloadUrl = await getDownloadURL(uploadTask!.snapshot.ref);
-              isDone = true;
-              clearTimeout(timer);
-              resolve({
-                url: downloadUrl,
-                storagePath,
-                fileName,
-                fileSize: fileOrBlob.size,
-                mimeType,
-              });
-            } catch (urlErr) {
-              isDone = true;
-              clearTimeout(timer);
-              reject(urlErr);
-            }
           }
-        );
-      } catch (initErr) {
-        isDone = true;
-        clearTimeout(timer);
-        reject(initErr);
-      }
-    });
-  };
+        },
+        (error) => {
+          if (isSettled) return;
+          isSettled = true;
+          clearTimeout(timer);
+          console.warn('[UPLOAD] Storage upload error, falling back to local media buffer:', error);
 
-  try {
-    const storageResult = await tryFirebaseStorage();
-    console.log(`[UPLOAD] Firebase Storage concluído: ${storageResult.url.substring(0, 40)}...`);
-    onProgress?.({
-      stage: 'storage_confirmed',
-      percent: 95,
-      message: 'Firebase confirmou o upload com sucesso!',
-    });
-    return storageResult;
-  } catch (storageErr: any) {
-    console.info(
-      `[UPLOAD] Storage em nuvem alternando para armazenamento direto (${storageErr?.code || storageErr?.message || 'Timeout/CORS'}).`
-    );
-    onProgress?.({
-      stage: 'storage_confirmed',
-      percent: 95,
-      message: 'Armazenamento confirmado!',
-    });
-    return {
-      url: fallbackDataUrl,
-      storagePath,
-      fileName,
-      fileSize: fileOrBlob.size,
-      mimeType,
-    };
-  }
+          onProgress?.({
+            stage: 'storage_confirmed',
+            percent: 85,
+            message: 'Arquivo protegido localmente.',
+          });
+
+          resolve({
+            url: localBlobUrl,
+            storagePath,
+            fileName: sanitizedName,
+            fileSize: fileOrBlob.size,
+            mimeType,
+            isLocalOnly: true,
+          });
+        },
+        async () => {
+          if (isSettled) return;
+          try {
+            const downloadUrl = await getDownloadURL(uploadTask!.snapshot.ref);
+            isSettled = true;
+            clearTimeout(timer);
+
+            console.log(`[UPLOAD] Firebase Storage sucesso: ${downloadUrl}`);
+            onProgress?.({
+              stage: 'storage_confirmed',
+              percent: 85,
+              message: 'Firebase confirmou o upload do arquivo com sucesso!',
+            });
+
+            resolve({
+              url: downloadUrl,
+              storagePath,
+              fileName: sanitizedName,
+              fileSize: fileOrBlob.size,
+              mimeType,
+              isLocalOnly: false,
+            });
+          } catch (urlErr) {
+            isSettled = true;
+            clearTimeout(timer);
+            console.warn('[UPLOAD] DownloadURL fetch warning:', urlErr);
+
+            resolve({
+              url: localBlobUrl,
+              storagePath,
+              fileName: sanitizedName,
+              fileSize: fileOrBlob.size,
+              mimeType,
+              isLocalOnly: true,
+            });
+          }
+        }
+      );
+    } catch (initErr) {
+      if (!isSettled) {
+        isSettled = true;
+        clearTimeout(timer);
+        console.warn('[UPLOAD] Storage init error, fallback to local:', initErr);
+
+        resolve({
+          url: localBlobUrl,
+          storagePath,
+          fileName: sanitizedName,
+          fileSize: fileOrBlob.size,
+          mimeType,
+          isLocalOnly: true,
+        });
+      }
+    }
+  });
 }
 
 /**
  * 3. Complete End-to-End Save Pipeline:
  * Storage -> Firestore -> Server Verification -> Confirmed Status
+ *
+ * Guaranteed to NEVER hang at 96% or freeze the UI.
  */
 export async function executeRecordCreationPipeline(params: {
   uid: string;
@@ -374,10 +385,10 @@ export async function executeRecordCreationPipeline(params: {
     onProgress,
   } = params;
 
-  // Step 1: Create or assign unique record ID
+  // Step 1: Assign permanent record ID
   const recordId =
     params.recordId || `rec_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-  console.log(`[UPLOAD] criando ID do registro: ${recordId}`);
+  console.log(`[UPLOAD] ID definitivo do registro: ${recordId}`);
 
   let attachments: RecordAttachment[] = [...existingAttachments];
   let primaryStoragePath: string | undefined;
@@ -386,7 +397,7 @@ export async function executeRecordCreationPipeline(params: {
   let primaryFileSize: number | undefined;
   let primaryMimeType: string | undefined;
 
-  // Step 2 & 4: If there is a file/blob to upload, execute Storage upload
+  // Step 2: Upload binary media to Storage if a new file exists
   if (fileOrBlob && type !== 'text') {
     const folderMap = {
       photo: 'images' as const,
@@ -397,12 +408,12 @@ export async function executeRecordCreationPipeline(params: {
       text: 'documents' as const,
     };
 
-    // Validation
     onProgress?.({
       stage: 'validating',
       percent: 10,
       message: 'Validando arquivo...',
     });
+
     const val = validateFile(fileOrBlob, type === 'mixed' ? 'document' : type);
     if (!val.valid) {
       onProgress?.({
@@ -414,7 +425,6 @@ export async function executeRecordCreationPipeline(params: {
       throw new Error(val.error || 'Arquivo inválido.');
     }
 
-    // Storage Upload with Progress & Timeout
     const uploadRes = await uploadToStorageWithProgress({
       uid,
       recordId,
@@ -453,16 +463,28 @@ export async function executeRecordCreationPipeline(params: {
     primaryMimeType = existingAttachments[0].mimeType;
   }
 
-  // Step 7: Create Firestore Document Payload
+  // Step 3: Write metadata to Firestore (Clean, light payload)
   onProgress?.({
     stage: 'saving_record',
-    percent: 96,
-    message: 'Salvando registro no Firestore...',
+    percent: 90,
+    message: 'Gravando metadados no Firestore...',
   });
-  console.log(`[UPLOAD] Firestore iniciado: salvando documento ${recordId}`);
+  console.log(`[FIRESTORE] Gravando metadados do documento: users/${uid}/records/${recordId}`);
 
   const now = new Date().toISOString();
   const opId = generateOperationId('rec_save');
+
+  // Strip any accidental huge raw base64 data URLs from Firestore attachments to obey the 1MB limit
+  const sanitizedAttachments = attachments.map((att) => {
+    let cleanUrl = att.url;
+    if (cleanUrl && cleanUrl.startsWith('data:') && cleanUrl.length > 200000) {
+      cleanUrl = ''; // Keep storagePath reference, don't bloat Firestore
+    }
+    return {
+      ...att,
+      url: cleanUrl,
+    };
+  });
 
   const fullRecord: DiaryRecord = {
     id: recordId,
@@ -475,9 +497,9 @@ export async function executeRecordCreationPipeline(params: {
     time: time || `${new Date().getHours().toString().padStart(2, '0')}:${new Date().getMinutes().toString().padStart(2, '0')}`,
     category,
     tags,
-    attachments,
+    attachments: sanitizedAttachments,
     storagePath: primaryStoragePath,
-    downloadUrl: primaryDownloadUrl,
+    downloadUrl: primaryDownloadUrl && !primaryDownloadUrl.startsWith('data:') ? primaryDownloadUrl : undefined,
     fileName: primaryFileName,
     fileSize: primaryFileSize,
     mimeType: primaryMimeType,
@@ -492,35 +514,32 @@ export async function executeRecordCreationPipeline(params: {
 
   const docRef = doc(db, 'users', uid, 'records', recordId);
 
-  try {
-    // Write to Firestore
-    await setDoc(docRef, sanitizeForFirestore({
+  // Protected Firestore write with an explicit 6-second timeout race
+  const writePromise = setDoc(
+    docRef,
+    sanitizeForFirestore({
       ...fullRecord,
       _serverTimestamp: serverTimestamp(),
-    }));
+    })
+  );
 
-    // Verify
-    try {
-      const snap = await getDoc(docRef);
-      if (snap.exists()) {
-        console.log(`[UPLOAD] Firestore confirmado: documento ${recordId} existe.`);
-      }
-    } catch (verifErr) {
-      console.warn('Firestore verification soft check:', verifErr);
-    }
+  const timeoutPromise = new Promise((_, reject) =>
+    setTimeout(() => reject(new Error('FIRESTORE_WRITE_TIMEOUT')), 6000)
+  );
 
-    console.log(`[UPLOAD] registro concluído com sucesso: ${recordId}`);
+  try {
+    await Promise.race([writePromise, timeoutPromise]);
+    console.log(`[FIRESTORE] Documento gravado e confirmado com sucesso: ${recordId}`);
+
     onProgress?.({
       stage: 'completed',
       percent: 100,
-      message: 'Concluído com sucesso!',
+      message: 'Salvo com sucesso!',
     });
 
     return fullRecord;
   } catch (firestoreErr: any) {
-    console.error(
-      `[UPLOAD ERROR] etapa: Firestore | código: ${firestoreErr.code || 'FIRESTORE_WRITE_FAILED'} | mensagem: ${firestoreErr.message}`
-    );
+    console.warn(`[FIRESTORE WARNING] Falha ou timeout na escrita direta (${firestoreErr?.message}). Salvando na fila local offline:`, firestoreErr);
 
     // Enqueue in offline sync queue to guarantee user data is saved persistently
     const queuedRecord: DiaryRecord = {
@@ -538,8 +557,9 @@ export async function executeRecordCreationPipeline(params: {
     onProgress?.({
       stage: 'completed',
       percent: 100,
-      message: 'Registro salvo localmente e sincronizando com a nuvem.',
+      message: 'Salvo localmente! Sincronização com o Firestore continuará em segundo plano.',
     });
+
     return queuedRecord;
   }
 }

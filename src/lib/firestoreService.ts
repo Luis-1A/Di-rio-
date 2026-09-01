@@ -134,27 +134,92 @@ export async function saveIAUSettings(
 }
 
 /**
- * 2. Records Management
+ * 2. Records Management (Merge-By-ID, Realtime Listeners, Permanent IDs & Empty Read Protection)
  */
+
+export function mergeRecords(
+  existingList: DiaryRecord[],
+  incomingServerList: DiaryRecord[]
+): DiaryRecord[] {
+  const map = new Map<string, DiaryRecord>();
+
+  // 1. Populate with existing local state (preserving any pending/saving/uploading records)
+  for (const item of existingList) {
+    if (item && item.id) {
+      map.set(item.id, item);
+    }
+  }
+
+  // 2. Overlay server data (server is source of truth for confirmed items)
+  for (const serverItem of incomingServerList) {
+    if (serverItem && serverItem.id) {
+      map.set(serverItem.id, {
+        ...serverItem,
+        syncStatus: 'synced',
+      });
+    }
+  }
+
+  // 3. Convert back to array
+  const merged = Array.from(map.values());
+
+  // 4. Sort chronologically (newest first)
+  merged.sort((a, b) => {
+    const timeA = new Date(a.createdAt || a.date || a.updatedAt || 0).getTime();
+    const timeB = new Date(b.createdAt || b.date || b.updatedAt || 0).getTime();
+    return timeB - timeA;
+  });
+
+  return merged;
+}
+
+export async function fetchRecordsDirectly(uid: string): Promise<DiaryRecord[]> {
+  try {
+    const recordsCol = collection(db, 'users', uid, 'records');
+    const snapshot = await getDocs(recordsCol);
+    const list: DiaryRecord[] = [];
+    snapshot.forEach((d) => {
+      list.push({ id: d.id, ...d.data() } as DiaryRecord);
+    });
+    list.sort((a, b) => {
+      const timeA = new Date(a.createdAt || a.date || a.updatedAt || 0).getTime();
+      const timeB = new Date(b.createdAt || b.date || b.updatedAt || 0).getTime();
+      return timeB - timeA;
+    });
+    return list;
+  } catch (err) {
+    console.warn('[FIRESTORE] Direct fetch records warning:', err);
+    return [];
+  }
+}
+
 export function subscribeToRecords(
   uid: string,
   onUpdate: (records: DiaryRecord[]) => void,
   onError?: (err: Error) => void
 ) {
   const recordsCol = collection(db, 'users', uid, 'records');
-  const q = query(recordsCol, orderBy('createdAt', 'desc'));
 
+  // Query collection directly without restrictive orderBy that could omit unindexed or in-flight docs
   return onSnapshot(
-    q,
+    recordsCol,
     (snapshot) => {
       const list: DiaryRecord[] = [];
       snapshot.forEach((d) => {
         list.push({ id: d.id, ...d.data() } as DiaryRecord);
       });
+
+      // In-memory sort by newest first
+      list.sort((a, b) => {
+        const timeA = new Date(a.createdAt || a.date || a.updatedAt || 0).getTime();
+        const timeB = new Date(b.createdAt || b.date || b.updatedAt || 0).getTime();
+        return timeB - timeA;
+      });
+
       onUpdate(list);
     },
     (error) => {
-      console.error('Snapshot error on records:', error);
+      console.error('[FIRESTORE ERROR] Snapshot error on records:', error);
       onError?.(error);
     }
   );
@@ -167,7 +232,7 @@ export async function saveRecord(
     createdAt?: string;
   }
 ): Promise<DiaryRecord> {
-  const recordId = record.id || `rec_${Date.now()}_${Math.random().toString(36).substr(2, 7)}`;
+  const recordId = record.id || `rec_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
   const now = new Date().toISOString();
   const opId = record.operationId || generateOperationId('rec');
 
@@ -192,6 +257,7 @@ export async function saveRecord(
       ...fullRecord,
       _serverTimestamp: serverTimestamp(),
     }));
+
     // If it was in the sync queue, mark as synced
     const pendingList = syncQueue.getPendingItems();
     const existingInQueue = pendingList.find(
@@ -202,7 +268,7 @@ export async function saveRecord(
     }
     return fullRecord;
   } catch (error: any) {
-    console.error('Firestore save failed for record:', error);
+    console.error('[FIRESTORE ERROR] Firestore save failed for record:', error);
     // Queue for sync when offline
     syncQueue.enqueue({
       operationId: opId,

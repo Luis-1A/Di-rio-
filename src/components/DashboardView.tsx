@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { DiaryRecord, MemoryItem, UserProfile } from '../types';
+import { getLocalMediaBlob } from '../lib/idbStorage';
 import {
   Plus,
   FileText,
@@ -89,6 +90,30 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     }
   };
 
+  const getSyncBadge = (status?: string) => {
+    if (status === 'pending') {
+      return (
+        <span className="inline-flex items-center gap-1 text-[10px] font-medium text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200/60">
+          <Clock className="w-2.5 h-2.5 text-amber-600 animate-spin" />
+          <span>Sincronizando</span>
+        </span>
+      );
+    }
+    if (status === 'failed') {
+      return (
+        <span className="inline-flex items-center gap-1 text-[10px] font-medium text-red-700 bg-red-50 px-1.5 py-0.5 rounded border border-red-200/60">
+          <span>Pendente</span>
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center gap-1 text-[10px] font-medium text-emerald-700 bg-emerald-50/70 px-1.5 py-0.5 rounded border border-emerald-200/50">
+        <CheckCircle2 className="w-2.5 h-2.5 text-emerald-600" />
+        <span>Nuvem</span>
+      </span>
+    );
+  };
+
   const formatFeedTime = (dateStr: string, createdAt: string) => {
     try {
       const now = new Date();
@@ -125,9 +150,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     }
   };
 
-  const toggleAudio = (e: React.MouseEvent, recordId: string, audioUrl?: string) => {
+  const toggleAudio = async (e: React.MouseEvent, recordId: string, audioUrl?: string) => {
     e.stopPropagation();
-    if (!audioUrl) return;
+
+    let resolvedUrl = audioUrl;
+    if (!resolvedUrl) {
+      const stored = await getLocalMediaBlob(recordId);
+      if (stored && stored.blob) {
+        resolvedUrl = URL.createObjectURL(stored.blob);
+      }
+    }
+
+    if (!resolvedUrl) return;
 
     if (playingAudioId === recordId) {
       if (audioInstancesRef.current[recordId]) {
@@ -141,7 +175,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       });
 
       if (!audioInstancesRef.current[recordId]) {
-        audioInstancesRef.current[recordId] = new Audio(audioUrl);
+        audioInstancesRef.current[recordId] = new Audio(resolvedUrl);
         audioInstancesRef.current[recordId].onended = () => setPlayingAudioId(null);
       }
 
@@ -297,9 +331,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 onClick={() => onSelectRecord(record)}
                 className="bg-white hover:bg-stone-50/60 border border-stone-200/80 rounded-3xl p-4 transition-all duration-150 cursor-pointer shadow-[0_2px_10px_rgba(0,0,0,0.02)] group space-y-3"
               >
-                {/* Top Badge & Date/Time */}
+                {/* Top Badge & Date/Time & Sync Status */}
                 <div className="flex items-center justify-between gap-2">
-                  {getRecordBadge(record.type)}
+                  <div className="flex items-center gap-1.5">
+                    {getRecordBadge(record.type)}
+                    {getSyncBadge(record.syncStatus)}
+                  </div>
                   <span className="text-[11px] text-stone-400 font-normal">
                     {formatFeedTime(record.date, record.createdAt)}
                   </span>
@@ -319,10 +356,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 )}
 
                 {/* Photo Preview */}
-                {photoAttachment && (
+                {(photoAttachment?.url || (record.type === 'photo' && record.downloadUrl)) && (
                   <div className="rounded-2xl overflow-hidden border border-stone-200/80 bg-stone-100 aspect-video max-h-56 relative">
                     <img
-                      src={photoAttachment.url}
+                      src={photoAttachment?.url || record.downloadUrl}
                       alt={record.title || 'Foto'}
                       className="w-full h-full object-cover group-hover:scale-[1.01] transition-transform duration-300"
                       referrerPolicy="no-referrer"
@@ -332,10 +369,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 )}
 
                 {/* Video Preview */}
-                {videoAttachment && (
+                {(videoAttachment?.url || (record.type === 'video' && record.downloadUrl)) && (
                   <div className="rounded-2xl overflow-hidden border border-stone-200/80 bg-stone-900 aspect-video max-h-56 relative group/vid">
                     <video
-                      src={videoAttachment.url}
+                      src={videoAttachment?.url || record.downloadUrl}
                       className="w-full h-full object-contain"
                       controls
                       preload="metadata"

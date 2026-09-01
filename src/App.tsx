@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   UserProfile,
   DiaryRecord,
@@ -8,6 +8,8 @@ import {
   subscribeToRecords,
   subscribeToMemories,
   flushSyncQueue,
+  mergeRecords,
+  fetchRecordsDirectly,
 } from './lib/firestoreService';
 import { subscribeToAuth } from './lib/authService';
 
@@ -21,13 +23,41 @@ import { TimelineView } from './components/TimelineView';
 import { IAUProfileView } from './components/IAUProfileView';
 import { DiagnosticsModal } from './components/DiagnosticsModal';
 import { PDFViewerModal } from './components/PDFViewerModal';
+import { GlobalSyncIndicator } from './components/GlobalSyncIndicator';
+import { processBackgroundUploadQueue } from './lib/backgroundUploadManager';
 import { BookOpen, Loader2 } from 'lucide-react';
+
+const RECORDS_CACHE_KEY_PREFIX = 'diario_pessoal_records_cache_';
+
+function getLocalCachedRecords(uid: string): DiaryRecord[] {
+  try {
+    const raw = localStorage.getItem(`${RECORDS_CACHE_KEY_PREFIX}${uid}`);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch (e) {
+    console.warn('[CACHE] Read records error:', e);
+  }
+  return [];
+}
+
+function saveLocalCachedRecords(uid: string, records: DiaryRecord[]) {
+  try {
+    localStorage.setItem(
+      `${RECORDS_CACHE_KEY_PREFIX}${uid}`,
+      JSON.stringify(records)
+    );
+  } catch (e) {
+    console.warn('[CACHE] Write records error:', e);
+  }
+}
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
 
-  // App Data States (Real Firestore Collections)
+  // App Data States (Real Firestore Collections with Persistent ID Merging)
   const [records, setRecords] = useState<DiaryRecord[]>([]);
   const [memories, setMemories] = useState<MemoryItem[]>([]);
 
@@ -56,6 +86,11 @@ export default function App() {
     const unsubscribe = subscribeToAuth(async (user: UserProfile | null) => {
       if (user) {
         setCurrentUser(user);
+        // Instant load from cache to prevent empty screen flashes
+        const cached = getLocalCachedRecords(user.uid);
+        if (cached.length > 0) {
+          setRecords(cached);
+        }
         flushSyncQueue(user.uid).catch((err) =>
           console.warn('Queue flush initial attempt:', err)
         );
@@ -70,18 +105,46 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // 2. Real-time Firestore Subscriptions for user data
+  // 2. Real-time Firestore Subscriptions with Merge-by-ID and Empty Protection
   useEffect(() => {
     if (!currentUser?.uid) return;
+    const uid = currentUser.uid;
 
     const unsubRecords = subscribeToRecords(
-      currentUser.uid,
-      (list) => setRecords(list),
-      (err) => console.warn('Records sub err:', err)
+      uid,
+      (incomingServerList) => {
+        setRecords((prevRecords) => {
+          // If server returned records, merge them cleanly by ID
+          if (incomingServerList.length > 0) {
+            const merged = mergeRecords(prevRecords, incomingServerList);
+            saveLocalCachedRecords(uid, merged);
+            return merged;
+          }
+
+          // Protection against empty read:
+          // If Firestore returns [] but we already have confirmed records,
+          // do NOT wipe them out blindly!
+          if (prevRecords.length > 0) {
+            // Verify asynchronously if server collection is genuinely empty
+            fetchRecordsDirectly(uid).then((directList) => {
+              if (directList.length === 0 && prevRecords.every(r => r.syncStatus === 'synced')) {
+                // If direct server fetch also confirms 0 records and no pending items, update
+                setRecords([]);
+                saveLocalCachedRecords(uid, []);
+              }
+            });
+            return prevRecords;
+          }
+
+          saveLocalCachedRecords(uid, []);
+          return [];
+        });
+      },
+      (err) => console.warn('[FIRESTORE SUB WARNING] Records subscription error:', err)
     );
 
     const unsubMemories = subscribeToMemories(
-      currentUser.uid,
+      uid,
       (list) => setMemories(list),
       (err) => console.warn('Memories sub err:', err)
     );
@@ -89,6 +152,42 @@ export default function App() {
     return () => {
       unsubRecords();
       unsubMemories();
+    };
+  }, [currentUser?.uid]);
+
+  // 3. Periodic 30-second Reconciliation & Online Auto-Sync Mechanism
+  useEffect(() => {
+    if (!currentUser?.uid) return;
+    const uid = currentUser.uid;
+
+    const runReconciliation = async () => {
+      try {
+        const serverList = await fetchRecordsDirectly(uid);
+        if (serverList.length > 0) {
+          setRecords((prev) => {
+            const merged = mergeRecords(prev, serverList);
+            saveLocalCachedRecords(uid, merged);
+            return merged;
+          });
+        }
+        await flushSyncQueue(uid);
+        await processBackgroundUploadQueue(uid);
+      } catch (err) {
+        console.warn('[RECONCILIATION] Background check warning:', err);
+      }
+    };
+
+    const handleOnline = () => {
+      console.log('[NETWORK] Conexão restabelecida. Sincronizando fila pendente...');
+      runReconciliation();
+    };
+
+    window.addEventListener('online', handleOnline);
+    const reconciliationInterval = setInterval(runReconciliation, 30000);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      clearInterval(reconciliationInterval);
     };
   }, [currentUser?.uid]);
 
@@ -122,6 +221,18 @@ export default function App() {
   const handleStartNewRecord = () => {
     setSelectedRecordForEdit(null);
     setActiveTab('new');
+  };
+
+  const handleRecordSaved = (savedRecord: DiaryRecord) => {
+    if (currentUser?.uid && savedRecord) {
+      setRecords((prev) => {
+        const merged = mergeRecords(prev, [savedRecord]);
+        saveLocalCachedRecords(currentUser.uid, merged);
+        return merged;
+      });
+    }
+    setSelectedRecordForEdit(null);
+    setActiveTab('dashboard');
   };
 
   const handleOpenPdf = (
@@ -178,10 +289,7 @@ export default function App() {
           <RecordEditor
             user={currentUser}
             initialRecord={selectedRecordForEdit}
-            onSaved={() => {
-              setSelectedRecordForEdit(null);
-              setActiveTab('dashboard');
-            }}
+            onSaved={handleRecordSaved}
             onCancel={() => {
               setSelectedRecordForEdit(null);
               setActiveTab('dashboard');
@@ -217,6 +325,9 @@ export default function App() {
         fileName={pdfModalData.fileName}
         fileSize={pdfModalData.fileSize}
       />
+
+      {/* Global Background Upload & Sync Indicator */}
+      {currentUser && <GlobalSyncIndicator userId={currentUser.uid} />}
 
       {/* System Diagnostics Modal */}
       <DiagnosticsModal

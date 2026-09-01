@@ -14,6 +14,8 @@ import {
   Plus,
   X,
   Eye,
+  Clock,
+  CheckCircle2,
 } from 'lucide-react';
 
 interface ArchiveViewProps {
@@ -327,10 +329,10 @@ export const ArchiveView: React.FC<ArchiveViewProps> = ({
                       {/* Left: Thumbnail & Details */}
                       <div className="flex items-center gap-3 min-w-0 flex-1">
                         {/* 1. Photo Thumbnail */}
-                        {photoAtt && (
+                        {(photoAtt?.url || (rec.type === 'photo' && rec.downloadUrl)) && (
                           <div className="w-12 h-12 rounded-xl overflow-hidden bg-stone-100 border border-stone-200/60 shrink-0">
                             <img
-                              src={photoAtt.url}
+                              src={photoAtt?.url || rec.downloadUrl}
                               alt={rec.title || 'Foto'}
                               className="w-full h-full object-cover"
                               referrerPolicy="no-referrer"
@@ -339,10 +341,10 @@ export const ArchiveView: React.FC<ArchiveViewProps> = ({
                         )}
 
                         {/* 2. Video Thumbnail */}
-                        {videoAtt && !photoAtt && (
+                        {(videoAtt?.url || (rec.type === 'video' && rec.downloadUrl)) && !photoAtt && (
                           <div className="w-12 h-12 rounded-xl overflow-hidden bg-stone-900 shrink-0 relative flex items-center justify-center">
                             <video
-                              src={videoAtt.url}
+                              src={videoAtt?.url || rec.downloadUrl}
                               className="w-full h-full object-cover opacity-75"
                             />
                             <div className="absolute inset-0 flex items-center justify-center">
@@ -424,7 +426,7 @@ export const ArchiveView: React.FC<ArchiveViewProps> = ({
                         </div>
                       </div>
 
-                      {/* Right: PDF Quick Button & Time */}
+                      {/* Right: PDF Quick Button & Time & Sync */}
                       <div className="flex items-center gap-2 shrink-0">
                         {isPDF && docAtt && onOpenPdf && (
                           <button
@@ -446,9 +448,18 @@ export const ArchiveView: React.FC<ArchiveViewProps> = ({
                           </button>
                         )}
 
-                        <span className="text-[11px] text-stone-400 font-normal">
-                          {formatItemTime(rec.createdAt)}
-                        </span>
+                        <div className="flex items-center gap-1.5 text-right">
+                          <span className="text-[11px] text-stone-400 font-normal">
+                            {formatItemTime(rec.createdAt)}
+                          </span>
+                          {rec.syncStatus === 'pending' ? (
+                            <Clock className="w-3 h-3 text-amber-600 animate-spin" title="Aguardando sincronização" />
+                          ) : rec.syncStatus === 'failed' ? (
+                            <span className="w-1.5 h-1.5 rounded-full bg-red-500" title="Pendente" />
+                          ) : (
+                            <CheckCircle2 className="w-3 h-3 text-emerald-600" title="Sincronizado na Nuvem" />
+                          )}
+                        </div>
                       </div>
                     </div>
                   );

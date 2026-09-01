@@ -1,13 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { DiaryRecord, RecordAttachment, RecordType, UserProfile } from '../types';
 import { AudioProcessor, AudioCaptureResult } from '../lib/audioProcessor';
-import {
-  validateFile,
-  uploadToStorageWithProgress,
-  executeRecordCreationPipeline,
-  UploadStage,
-  UploadStageUpdate,
-} from '../lib/uploadService';
+import { validateFile, UploadStage } from '../lib/uploadService';
+import { enqueueBackgroundUpload } from '../lib/backgroundUploadManager';
 import {
   X,
   Mic,
@@ -45,6 +40,13 @@ export const RecordEditor: React.FC<RecordEditorProps> = ({
   onCancel,
   onOpenPdf,
 }) => {
+  // Permanent Record ID: never changes during the lifecycle of this record creation or edit
+  const [recordId] = useState<string>(
+    () =>
+      initialRecord?.id ||
+      `rec_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`
+  );
+
   const [selectedType, setSelectedType] = useState<FormType>(
     initialRecord
       ? initialRecord.type === 'mixed'
@@ -60,6 +62,8 @@ export const RecordEditor: React.FC<RecordEditorProps> = ({
   const [date, setDate] = useState(
     initialRecord?.date || new Date().toISOString().split('T')[0]
   );
+  const [category] = useState(initialRecord?.category || 'geral');
+  const [tags] = useState<string[]>(initialRecord?.tags || []);
   const [attachments, setAttachments] = useState<RecordAttachment[]>(
     initialRecord?.attachments || []
   );
@@ -115,23 +119,14 @@ export const RecordEditor: React.FC<RecordEditorProps> = ({
   /**
    * File Selection & Validation with Resumable Upload
    */
+  /**
+   * File Selection & Validation (Instant Local-First Preview)
+   */
   const handleFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     setUploadError(null);
-    setPendingFile(file);
-    setPendingFileName(file.name);
-    setPendingFileSize(file.size);
-    setPendingFileType(selectedType);
-
-    // Step 1: Selected
-    setUploadStage('selected');
-    setUploadPercent(10);
-    setUploadMessage(`Selecionado: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`);
-
-    // Step 2: Validate file
-    setUploadStage('validating');
     const val = validateFile(file, selectedType);
     if (!val.valid) {
       setUploadStage('failed');
@@ -140,85 +135,40 @@ export const RecordEditor: React.FC<RecordEditorProps> = ({
       return;
     }
 
+    setPendingFile(file);
+    setPendingFileName(val.fileName);
+    setPendingFileSize(val.fileSize);
+    setPendingFileType(selectedType);
+
+    const localUrl = URL.createObjectURL(file);
+    setPreviewUrl(localUrl);
+
+    const newAtt: RecordAttachment = {
+      id: `att_${Date.now()}`,
+      name: val.fileName,
+      type:
+        selectedType === 'photo'
+          ? 'image'
+          : selectedType === 'document'
+          ? 'document'
+          : (selectedType as any),
+      url: localUrl,
+      size: val.fileSize,
+      mimeType: val.mimeType,
+    };
+    setAttachments([newAtt]);
+
     // Auto-fill title if empty
     if (!title.trim()) {
       const cleanName = file.name.replace(/\.[^/.]+$/, '');
       setTitle(cleanName);
     }
 
-    // Step 3 & 4: Upload to Firebase Storage
-    await executeFileUpload(file, selectedType, val.fileName, val.mimeType);
+    setUploadStage('selected');
+    setUploadPercent(100);
+    setUploadMessage(`Arquivo pronto: ${val.fileName}`);
 
     if (fileInputRef.current) fileInputRef.current.value = '';
-  };
-
-  const executeFileUpload = async (
-    fileOrBlob: File | Blob,
-    type: FormType,
-    fileName: string,
-    mimeType: string
-  ) => {
-    setUploadStage('uploading');
-    setUploadPercent(25);
-    setUploadMessage('Enviando para o Firebase...');
-    setUploadError(null);
-
-    const folderMap = {
-      photo: 'images' as const,
-      video: 'videos' as const,
-      audio: 'audio' as const,
-      document: 'documents' as const,
-      text: 'documents' as const,
-    };
-
-    const tempRecordId =
-      initialRecord?.id ||
-      `rec_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-
-    try {
-      const result = await uploadToStorageWithProgress({
-        uid: user.uid,
-        recordId: tempRecordId,
-        fileOrBlob,
-        folder: folderMap[type],
-        fileName,
-        mimeType,
-        onProgress: (update: UploadStageUpdate) => {
-          setUploadStage(update.stage);
-          setUploadPercent(update.percent);
-          setUploadMessage(update.message);
-        },
-        timeoutMs: 6000,
-      });
-
-      const newAtt: RecordAttachment = {
-        id: `att_${Date.now()}`,
-        name: result.fileName,
-        type:
-          type === 'photo'
-            ? 'image'
-            : type === 'document'
-            ? 'document'
-            : (type as any),
-        url: result.url,
-        storagePath: result.storagePath,
-        size: result.fileSize,
-        mimeType: result.mimeType,
-        durationSeconds: type === 'audio' ? recordSeconds : undefined,
-      };
-
-      setAttachments([newAtt]);
-      setPreviewUrl(result.url);
-      setUploadStage('storage_confirmed');
-      setUploadPercent(100);
-      setUploadMessage('Firebase confirmou o upload com sucesso!');
-    } catch (err: any) {
-      console.error('[UPLOAD ERROR] Falha no upload:', err);
-      setUploadStage('failed');
-      setUploadError(
-        err.message || 'Falha na conexão com o servidor de armazenamento.'
-      );
-    }
   };
 
   // Audio Recording Handlers
@@ -246,10 +196,6 @@ export const RecordEditor: React.FC<RecordEditorProps> = ({
     if (!audioProcessorRef.current || !isRecording) return;
     try {
       setIsRecording(false);
-      setUploadStage('validating');
-      setUploadMessage('Processando gravação de áudio...');
-      setUploadPercent(20);
-
       const result: AudioCaptureResult =
         await audioProcessorRef.current.stopRecording();
       const fileName = `gravacao_${Date.now()}.${
@@ -261,11 +207,32 @@ export const RecordEditor: React.FC<RecordEditorProps> = ({
       setPendingFileSize(result.blob.size);
       setPendingFileType('audio');
 
+      const localUrl = URL.createObjectURL(result.blob);
+      setPreviewUrl(localUrl);
+
+      const newAtt: RecordAttachment = {
+        id: `att_${Date.now()}`,
+        name: fileName,
+        type: 'audio',
+        url: localUrl,
+        size: result.blob.size,
+        mimeType: result.mimeType,
+        durationSeconds: recordSeconds,
+      };
+      setAttachments([newAtt]);
+
       if (!title.trim()) {
-        setTitle(`Áudio gravado (${new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })})`);
+        setTitle(
+          `Áudio gravado (${new Date().toLocaleTimeString('pt-BR', {
+            hour: '2-digit',
+            minute: '2-digit',
+          })})`
+        );
       }
 
-      await executeFileUpload(result.blob, 'audio', fileName, result.mimeType);
+      setUploadStage('selected');
+      setUploadPercent(100);
+      setUploadMessage(`Gravação concluída: ${fileName}`);
     } catch (err: any) {
       console.error('[AUDIO ERROR] Falha ao salvar áudio:', err);
       setUploadStage('failed');
@@ -273,14 +240,6 @@ export const RecordEditor: React.FC<RecordEditorProps> = ({
         err.message || 'Erro ao processar gravação. Tente novamente.'
       );
     }
-  };
-
-  const handleRetryUpload = async () => {
-    if (!pendingFile) return;
-    const isFile = pendingFile instanceof File;
-    const fName = isFile ? (pendingFile as File).name : `arquivo_${Date.now()}`;
-    const mMime = pendingFile.type || 'application/octet-stream';
-    await executeFileUpload(pendingFile, pendingFileType, fName, mMime);
   };
 
   const handleRemoveAttachment = () => {
@@ -313,12 +272,12 @@ export const RecordEditor: React.FC<RecordEditorProps> = ({
   };
 
   /**
-   * Final Save Record Submission (Guaranteed Firestore Write & Confirmation)
+   * Final Save Record Submission (Instant Local-First with Background Sync)
    */
   const handleSave = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
 
-    if (isSubmittingRef.current || uploadStage === 'uploading' || uploadStage === 'saving_record') {
+    if (isSubmittingRef.current) {
       return;
     }
 
@@ -329,42 +288,52 @@ export const RecordEditor: React.FC<RecordEditorProps> = ({
 
     isSubmittingRef.current = true;
     setUploadStage('saving_record');
-    setUploadPercent(95);
-    setUploadMessage('Salvando registro no Firestore...');
+    setUploadPercent(100);
+    setUploadMessage('Salvo no dispositivo! Sincronizando com a nuvem...');
     setUploadError(null);
 
     try {
-      const savedRecord = await executeRecordCreationPipeline({
+      const savedRecord = await enqueueBackgroundUpload({
         uid: user.uid,
-        recordId: initialRecord?.id,
+        recordId,
         type: selectedType === 'text' ? 'text' : (selectedType as RecordType),
-        title: title.trim() || (selectedType === 'photo' ? 'Foto' : selectedType === 'audio' ? 'Áudio' : selectedType === 'video' ? 'Vídeo' : selectedType === 'document' ? 'Arquivo' : 'Anotação'),
+        title:
+          title.trim() ||
+          (selectedType === 'photo'
+            ? 'Foto'
+            : selectedType === 'audio'
+            ? 'Áudio'
+            : selectedType === 'video'
+            ? 'Vídeo'
+            : selectedType === 'document'
+            ? 'Arquivo'
+            : 'Anotação'),
         content: content.trim(),
         date,
-        time: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+        time: new Date().toLocaleTimeString('pt-BR', {
+          hour: '2-digit',
+          minute: '2-digit',
+        }),
+        category,
+        tags,
+        fileOrBlob: pendingFile,
+        fileName: pendingFileName,
+        mimeType: pendingFile?.type,
+        audioDurationSeconds:
+          selectedType === 'audio' ? recordSeconds : undefined,
         existingAttachments: attachments,
-        audioDurationSeconds: selectedType === 'audio' ? recordSeconds : undefined,
-        onProgress: (update) => {
-          setUploadStage(update.stage);
-          setUploadPercent(update.percent);
-          setUploadMessage(update.message);
-        },
       });
 
-      setUploadStage('completed');
-      setUploadPercent(100);
-      setUploadMessage('Registro salvo com sucesso!');
-
-      setTimeout(() => {
-        isSubmittingRef.current = false;
-        onSaved(savedRecord);
-      }, 400);
+      isSubmittingRef.current = false;
+      onSaved(savedRecord);
     } catch (err: any) {
-      console.error('[SAVE ERROR] Falha ao salvar no Firestore:', err);
+      console.error('[SAVE ERROR] Falha ao salvar no dispositivo:', err);
       isSubmittingRef.current = false;
       setUploadStage('failed');
       setUploadError(
-        `Não foi possível salvar o registro: ${err.message || 'Erro de rede. Tente novamente.'}`
+        `Não foi possível salvar o registro: ${
+          err.message || 'Erro no armazenamento local. Tente novamente.'
+        }`
       );
     }
   };
@@ -683,71 +652,42 @@ export const RecordEditor: React.FC<RecordEditorProps> = ({
               <div className="bg-white border border-stone-200/90 rounded-xl p-3 space-y-2">
                 <div className="flex items-center justify-between text-xs">
                   <div className="flex items-center gap-2">
-                    {uploadStage === 'uploading' || uploadStage === 'saving_record' || uploadStage === 'validating' ? (
+                    {uploadStage === 'saving_record' ? (
                       <Loader2 className="w-3.5 h-3.5 text-orange-600 animate-spin" />
-                    ) : uploadStage === 'storage_confirmed' || uploadStage === 'completed' ? (
-                      <CheckCircle2 className="w-4 h-4 text-emerald-600" />
                     ) : uploadStage === 'failed' ? (
                       <AlertCircle className="w-4 h-4 text-red-600" />
                     ) : (
-                      <UploadCloud className="w-3.5 h-3.5 text-stone-500" />
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600" />
                     )}
                     <span
                       className={`font-semibold ${
                         uploadStage === 'failed'
                           ? 'text-red-700'
-                          : uploadStage === 'completed' || uploadStage === 'storage_confirmed'
-                          ? 'text-emerald-700'
                           : 'text-stone-800'
                       }`}
                     >
-                      {uploadStage === 'selected' && '1. Arquivo Selecionado'}
-                      {uploadStage === 'validating' && '2. Validando Arquivo...'}
-                      {uploadStage === 'uploading' && '3. Enviando ao Firebase...'}
-                      {uploadStage === 'storage_confirmed' && '4. Firebase Confirmou!'}
-                      {uploadStage === 'saving_record' && '5. Salvando no Firestore...'}
-                      {uploadStage === 'completed' && '6. Concluído com Sucesso!'}
-                      {uploadStage === 'failed' && 'Falha no Envio'}
+                      {uploadStage === 'selected' && 'Arquivo Pronto no Dispositivo'}
+                      {uploadStage === 'saving_record' && 'Salvando no Dispositivo...'}
+                      {uploadStage === 'completed' && 'Salvo! Sincronizando em 2º plano'}
+                      {uploadStage === 'failed' && 'Erro de Validação'}
                     </span>
                   </div>
 
-                  <span className="text-[11px] font-mono text-stone-500">
-                    {uploadPercent}%
+                  <span className="text-[11px] font-mono text-emerald-600 font-semibold">
+                    ✓ Local
                   </span>
                 </div>
 
-                {/* Progress Bar */}
-                <div className="w-full bg-stone-100 rounded-full h-1.5 overflow-hidden">
-                  <div
-                    className={`h-full transition-all duration-300 ${
-                      uploadStage === 'failed'
-                        ? 'bg-red-500'
-                        : uploadStage === 'completed' || uploadStage === 'storage_confirmed'
-                        ? 'bg-emerald-500'
-                        : 'bg-orange-600'
-                    }`}
-                    style={{ width: `${Math.max(5, uploadPercent)}%` }}
-                  />
-                </div>
+                <p className="text-[11px] text-stone-500">
+                  {uploadMessage || 'O arquivo é salvo de imediato no aparelho e enviado ao Firebase em segundo plano.'}
+                </p>
 
-                {uploadMessage && (
-                  <p className="text-[11px] text-stone-500">{uploadMessage}</p>
-                )}
-
-                {/* Error Banner with Retry */}
+                {/* Error Banner */}
                 {uploadError && (
                   <div className="pt-1 flex items-center justify-between gap-2">
                     <p className="text-xs text-red-600 font-medium">
                       {uploadError}
                     </p>
-                    <button
-                      type="button"
-                      onClick={handleRetryUpload}
-                      className="px-2.5 py-1 bg-red-50 hover:bg-red-100 text-red-700 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1 cursor-pointer shrink-0"
-                    >
-                      <RefreshCw className="w-3 h-3" />
-                      <span>Tentar novamente</span>
-                    </button>
                   </div>
                 )}
               </div>
