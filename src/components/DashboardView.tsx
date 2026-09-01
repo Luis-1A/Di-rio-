@@ -357,11 +357,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
                 {/* Photo Preview */}
                 {(photoAttachment?.url || (record.type === 'photo' && record.downloadUrl)) && (
-                  <div className="rounded-2xl overflow-hidden border border-stone-200/80 bg-stone-100 aspect-video max-h-56 relative">
+                  <div className="rounded-2xl overflow-hidden border border-stone-200/80 bg-stone-900/5 max-h-72 relative flex items-center justify-center p-1">
                     <img
                       src={photoAttachment?.url || record.downloadUrl}
                       alt={record.title || 'Foto'}
-                      className="w-full h-full object-cover group-hover:scale-[1.01] transition-transform duration-300"
+                      className="max-w-full max-h-72 w-auto h-auto object-contain rounded-xl group-hover:scale-[1.01] transition-transform duration-300"
                       referrerPolicy="no-referrer"
                       loading="lazy"
                     />

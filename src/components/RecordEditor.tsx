@@ -560,13 +560,13 @@ export const RecordEditor: React.FC<RecordEditorProps> = ({
               </button>
             </div>
 
-            {/* Photo Preview */}
+            {/* Photo Preview: Zero crop, native ratio */}
             {selectedType === 'photo' && previewUrl && (
-              <div className="rounded-xl overflow-hidden border border-stone-200 bg-stone-100 aspect-video max-h-56 relative">
+              <div className="rounded-xl overflow-hidden border border-stone-200 bg-stone-900/5 max-h-72 relative flex items-center justify-center p-1">
                 <img
                   src={previewUrl}
                   alt="Pré-visualização"
-                  className="w-full h-full object-cover"
+                  className="max-w-full max-h-72 w-auto h-auto object-contain rounded-lg"
                 />
               </div>
             )}

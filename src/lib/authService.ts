@@ -359,6 +359,69 @@ export async function resetOrChangePassword(
 }
 
 /**
+ * Verifies user password securely against Firebase Auth & cryptographic account store.
+ * Returns true if valid, throws error if invalid.
+ */
+export async function verifyAccountPassword(email: string, pass: string): Promise<boolean> {
+  const cleanEmail = email.trim().toLowerCase();
+  const cleanPass = pass.trim();
+
+  if (!cleanPass) {
+    throw new Error('Informe a sua senha para confirmar a exclusão.');
+  }
+
+  // 1. Try Firebase Auth reauthentication if currentUser exists
+  if (auth.currentUser && auth.currentUser.email) {
+    try {
+      const { EmailAuthProvider, reauthenticateWithCredential } = await import('firebase/auth');
+      const cred = EmailAuthProvider.credential(auth.currentUser.email, cleanPass);
+      await reauthenticateWithCredential(auth.currentUser, cred);
+      return true;
+    } catch (firebaseAuthErr: any) {
+      console.info('[AUTH] Firebase Auth direct check:', firebaseAuthErr.code || firebaseAuthErr.message);
+      if (firebaseAuthErr.code === 'auth/wrong-password' || firebaseAuthErr.code === 'auth/invalid-credential') {
+        throw new Error('Senha incorreta. O registro não foi excluído.');
+      }
+      // If provider not linked or anonymous, fallback to cryptographic account store check
+    }
+  }
+
+  // 2. Check Cryptographic Account store with Salted SHA-256
+  const uid = await generateDeterministicUid(cleanEmail);
+  const localAccounts = getLocalAccounts();
+  let accountData: AuthAccountData | null = localAccounts[cleanEmail] || null;
+
+  if (!accountData) {
+    try {
+      const accDocRef = doc(db, 'users', uid, 'profile', 'account');
+      const snap = await getDoc(accDocRef);
+      if (snap.exists()) {
+        accountData = snap.data() as AuthAccountData;
+      }
+    } catch (e) {
+      console.warn('Account lookup error during verification:', e);
+    }
+  }
+
+  if (accountData && accountData.passwordHash && accountData.salt) {
+    const computedHash = await hashPassword(cleanPass, accountData.salt);
+    if (computedHash === accountData.passwordHash) {
+      return true;
+    } else {
+      throw new Error('Senha incorreta. O registro não foi excluído.');
+    }
+  }
+
+  // If user registered as guest or without password record
+  if (cleanEmail.includes('guest') || cleanEmail.includes('diario.local')) {
+    // If guest password is empty or any match
+    return true;
+  }
+
+  throw new Error('Senha incorreta. O registro não foi excluído.');
+}
+
+/**
  * Instant Guest / Demo Login (No password needed)
  */
 export async function loginAsGuest(guestName = 'Luis'): Promise<UserProfile> {

@@ -23,6 +23,7 @@ import { TimelineView } from './components/TimelineView';
 import { IAUProfileView } from './components/IAUProfileView';
 import { DiagnosticsModal } from './components/DiagnosticsModal';
 import { PDFViewerModal } from './components/PDFViewerModal';
+import { RecordDetailView } from './components/RecordDetailView';
 import { GlobalSyncIndicator } from './components/GlobalSyncIndicator';
 import { processBackgroundUploadQueue } from './lib/backgroundUploadManager';
 import { BookOpen, Loader2 } from 'lucide-react';
@@ -63,6 +64,8 @@ export default function App() {
 
   // Active View Tab
   const [activeTab, setActiveTab] = useState<string>('dashboard');
+  const [returnTab, setReturnTab] = useState<string>('dashboard');
+  const [viewingRecord, setViewingRecord] = useState<DiaryRecord | null>(null);
   const [selectedRecordForEdit, setSelectedRecordForEdit] = useState<DiaryRecord | null>(null);
 
   // Diagnostics Modal
@@ -213,13 +216,21 @@ export default function App() {
   }
 
   // Navigation handlers
-  const handleOpenRecordForEdit = (rec: DiaryRecord) => {
+  const handleOpenRecordForView = (rec: DiaryRecord) => {
+    setViewingRecord(rec);
+    setReturnTab(activeTab === 'view-record' || activeTab === 'edit' || activeTab === 'new' ? 'dashboard' : activeTab);
+    setActiveTab('view-record');
+  };
+
+  const handleStartEditFromView = (rec: DiaryRecord) => {
     setSelectedRecordForEdit(rec);
     setActiveTab('edit');
   };
 
   const handleStartNewRecord = () => {
     setSelectedRecordForEdit(null);
+    setViewingRecord(null);
+    setReturnTab(activeTab === 'view-record' || activeTab === 'edit' || activeTab === 'new' ? 'dashboard' : activeTab);
     setActiveTab('new');
   };
 
@@ -231,8 +242,37 @@ export default function App() {
         return merged;
       });
     }
+    // Return to clean read-only view with freshly saved data
+    setViewingRecord(savedRecord);
     setSelectedRecordForEdit(null);
-    setActiveTab('dashboard');
+    setActiveTab('view-record');
+  };
+
+  const handleRecordDeleted = (deletedId: string) => {
+    if (currentUser?.uid) {
+      setRecords((prev) => {
+        const updated = prev.filter((r) => r.id !== deletedId);
+        saveLocalCachedRecords(currentUser.uid, updated);
+        return updated;
+      });
+    }
+    setViewingRecord(null);
+    setSelectedRecordForEdit(null);
+    setActiveTab(returnTab || 'dashboard');
+  };
+
+  const handleCancelEdit = () => {
+    setSelectedRecordForEdit(null);
+    if (viewingRecord) {
+      setActiveTab('view-record');
+    } else {
+      setActiveTab(returnTab || 'dashboard');
+    }
+  };
+
+  const handleBackFromView = () => {
+    setViewingRecord(null);
+    setActiveTab(returnTab || 'dashboard');
   };
 
   const handleOpenPdf = (
@@ -256,9 +296,18 @@ export default function App() {
       <Header
         user={currentUser}
         activeTab={activeTab}
-        setActiveTab={setActiveTab}
+        setActiveTab={(tab) => {
+          if (tab !== 'view-record') {
+            setViewingRecord(null);
+            setSelectedRecordForEdit(null);
+          }
+          setActiveTab(tab);
+        }}
         onOpenDiagnostics={() => setDiagnosticsOpen(true)}
-        onOpenSearch={() => setActiveTab('archive')}
+        onOpenSearch={() => {
+          setViewingRecord(null);
+          setActiveTab('archive');
+        }}
       />
 
       {/* Main Content Area */}
@@ -269,7 +318,7 @@ export default function App() {
             records={records}
             memories={memories}
             onNewRecord={handleStartNewRecord}
-            onSelectRecord={handleOpenRecordForEdit}
+            onSelectRecord={handleOpenRecordForView}
             onViewAllRecords={() => setActiveTab('archive')}
             onOpenPdf={handleOpenPdf}
           />
@@ -279,8 +328,19 @@ export default function App() {
           <ArchiveView
             user={currentUser}
             records={records}
-            onSelectRecord={handleOpenRecordForEdit}
+            onSelectRecord={handleOpenRecordForView}
             onNewRecord={handleStartNewRecord}
+            onOpenPdf={handleOpenPdf}
+          />
+        )}
+
+        {activeTab === 'view-record' && viewingRecord && (
+          <RecordDetailView
+            user={currentUser}
+            record={viewingRecord}
+            onBack={handleBackFromView}
+            onEdit={handleStartEditFromView}
+            onDeleted={handleRecordDeleted}
             onOpenPdf={handleOpenPdf}
           />
         )}
@@ -290,10 +350,7 @@ export default function App() {
             user={currentUser}
             initialRecord={selectedRecordForEdit}
             onSaved={handleRecordSaved}
-            onCancel={() => {
-              setSelectedRecordForEdit(null);
-              setActiveTab('dashboard');
-            }}
+            onCancel={handleCancelEdit}
             onOpenPdf={handleOpenPdf}
           />
         )}
@@ -302,7 +359,7 @@ export default function App() {
           <TimelineView
             user={currentUser}
             records={records}
-            onSelectRecord={handleOpenRecordForEdit}
+            onSelectRecord={handleOpenRecordForView}
             onNewRecord={handleStartNewRecord}
             onOpenPdf={handleOpenPdf}
           />
@@ -314,7 +371,16 @@ export default function App() {
       </main>
 
       {/* Mobile Bottom Navigation */}
-      <BottomNav activeTab={activeTab} setActiveTab={setActiveTab} />
+      <BottomNav
+        activeTab={activeTab}
+        setActiveTab={(tab) => {
+          if (tab !== 'view-record') {
+            setViewingRecord(null);
+            setSelectedRecordForEdit(null);
+          }
+          setActiveTab(tab);
+        }}
+      />
 
       {/* In-App PDF Viewer Modal */}
       <PDFViewerModal
