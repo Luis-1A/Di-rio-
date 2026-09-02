@@ -425,8 +425,11 @@ export default function App() {
         <PhotoEditorModal
           isOpen={photoEditorData.isOpen}
           onClose={() => setPhotoEditorData((prev) => ({ ...prev, isOpen: false }))}
+          record={photoEditorData.record}
           sourceRecord={photoEditorData.record}
+          imageUrl={photoEditorData.imageUrl}
           initialImageUrl={photoEditorData.imageUrl}
+          user={currentUser}
           currentUser={currentUser}
           onSavedNewPhoto={handlePhotoEditorSaved}
         />

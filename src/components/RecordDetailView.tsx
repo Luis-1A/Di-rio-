@@ -370,77 +370,15 @@ export const RecordDetailView: React.FC<RecordDetailViewProps> = ({
           )}
         </div>
 
-        {/* Media Attachments Section (ZERO CROP & FULL FIDELITY) */}
-        {record.type === 'photo' && (primaryUrl || record.thumbnailUrl) && (
+        {/* Media Attachments Section (ZERO CROP, HIGH FIDELITY, LIVE STREAMING & CACHE) */}
+        {(record.type === 'photo' || record.type === 'video') && (
           <div className="pt-2">
-            <div className="relative group bg-stone-950/5 border border-stone-200/90 rounded-2xl overflow-hidden p-2 flex items-center justify-center min-h-[220px]">
-              {/* Photo Display: object-contain with native aspect ratio preserved */}
-              <img
-                src={primaryUrl || record.thumbnailUrl}
-                alt={record.title || 'Foto do registro'}
-                className="max-w-full max-h-[75vh] w-auto h-auto object-contain rounded-xl transition-transform duration-200"
-                style={{ imageOrientation: 'from-image' }}
-              />
-
-              <div className="absolute top-4 right-4 flex items-center gap-2">
-                {onEditPhoto && (
-                  <button
-                    type="button"
-                    onClick={() => onEditPhoto(record, primaryUrl || record.thumbnailUrl || '')}
-                    className="p-2 bg-black/70 hover:bg-black/90 text-white rounded-xl backdrop-blur-xs transition-all cursor-pointer shadow-md flex items-center gap-1.5 text-xs font-semibold"
-                    title="Editar foto no sistema"
-                  >
-                    <Wand2 className="w-4 h-4 text-amber-300" />
-                    <span>Editar</span>
-                  </button>
-                )}
-
-                <button
-                  type="button"
-                  onClick={() => setFullscreenImage(primaryUrl || record.thumbnailUrl || '')}
-                  className="p-2 bg-black/60 hover:bg-black/80 text-white rounded-xl backdrop-blur-xs opacity-90 group-hover:opacity-100 transition-opacity cursor-pointer shadow-md"
-                  title="Ver em tela cheia"
-                >
-                  <Maximize2 className="w-4 h-4" />
-                </button>
-              </div>
-            </div>
-            {primaryAttachment?.name && (
-              <p className="text-xs text-stone-500 mt-2 text-center font-mono">
-                {primaryAttachment.name} {primaryAttachment.size ? `(${formatFileSize(primaryAttachment.size)})` : ''}
-              </p>
-            )}
-          </div>
-        )}
-
-        {/* Video Player: Zero-crop, full controls */}
-        {record.type === 'video' && (primaryUrl || record.downloadUrl || record.thumbnailUrl) && (
-          <div className="pt-2">
-            <div className="bg-black rounded-2xl overflow-hidden shadow-sm flex items-center justify-center min-h-[240px] relative">
-              {primaryUrl || record.downloadUrl ? (
-                <video
-                  src={primaryUrl || record.downloadUrl}
-                  controls
-                  playsInline
-                  preload="metadata"
-                  className="w-full max-h-[70vh] h-auto object-contain"
-                >
-                  Seu navegador não suporta reprodução de vídeo HTML5.
-                </video>
-              ) : (
-                <div className="relative w-full flex items-center justify-center">
-                  <img
-                    src={record.thumbnailUrl}
-                    alt={record.title || 'Vídeo'}
-                    className="w-full max-h-[70vh] h-auto object-contain opacity-75"
-                  />
-                  <div className="absolute inset-0 bg-black/50 backdrop-blur-xs flex flex-col items-center justify-center gap-2.5 text-white p-4 text-center">
-                    <RotateCw className="w-6 h-6 animate-spin text-amber-400" />
-                    <p className="text-sm font-bold">Carregando vídeo da nuvem...</p>
-                  </div>
-                </div>
-              )}
-            </div>
+            <MediaFeedRenderer
+              record={record}
+              mode="detail"
+              onEditPhoto={onEditPhoto}
+              onOpenPdf={onOpenPdf}
+            />
             {primaryAttachment?.name && (
               <p className="text-xs text-stone-500 mt-2 text-center font-mono">
                 {primaryAttachment.name} {primaryAttachment.size ? `(${formatFileSize(primaryAttachment.size)})` : ''}

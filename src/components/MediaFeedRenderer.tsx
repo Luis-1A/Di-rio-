@@ -13,6 +13,10 @@ import {
   Sparkles,
   Maximize2,
   Wand2,
+  DownloadCloud,
+  CheckCircle2,
+  Radio,
+  ExternalLink,
 } from 'lucide-react';
 
 interface MediaFeedRendererProps {
@@ -36,18 +40,24 @@ export const MediaFeedRenderer: React.FC<MediaFeedRendererProps> = ({
     mimeType,
     fileName,
     fileSize,
+    isFromCache,
     isVideo,
     isImage,
     isAudio,
     isPdf,
     isDocument,
     errorMessage,
+    isDownloadingToCache,
+    downloadProgress,
+    cacheLocally,
     retry,
   } = useResolvedMedia(record);
 
   const [isPlayingAudio, setIsPlayingAudio] = useState(false);
   const audioInstanceRef = React.useRef<HTMLAudioElement | null>(null);
   const [imageLoaded, setImageLoaded] = useState(false);
+  const [videoError, setVideoError] = useState(false);
+  const [videoBuffering, setVideoBuffering] = useState(false);
 
   // 1. IMAGE PREVIEW (Zero Crop, object-contain, instant render, clear states)
   if (isImage) {
@@ -126,57 +136,133 @@ export const MediaFeedRenderer: React.FC<MediaFeedRendererProps> = ({
     );
   }
 
-  // 2. VIDEO PLAYER (Zero Crop, progressive streaming, auto video tag, clear loading & retry)
+  // 2. VIDEO PLAYER (Zero Crop, progressive live streaming, offline caching & fallback)
   if (isVideo) {
     return (
       <div className="w-full space-y-2">
         <div
-          className={`rounded-2xl overflow-hidden border border-stone-200/80 bg-stone-950 relative flex items-center justify-center transition-all ${
+          className={`rounded-2xl overflow-hidden border border-stone-800 bg-stone-950 relative flex items-center justify-center transition-all ${
             mode === 'detail' ? 'min-h-[240px] max-h-[72vh]' : 'aspect-video max-h-60'
           }`}
         >
           {status === 'LOADING_METADATA' && !mediaUrl && (
             <div className="flex flex-col items-center justify-center p-8 text-white gap-2.5">
               <RotateCw className="w-6 h-6 animate-spin text-purple-400" />
-              <span className="text-xs font-medium text-stone-300">Carregando vídeo da nuvem...</span>
+              <span className="text-xs font-medium text-stone-300">Conectando transmissão do vídeo...</span>
             </div>
           )}
 
-          {status === 'ERROR' && !mediaUrl && (
+          {(status === 'ERROR' || videoError) && !mediaUrl && (
             <div className="flex flex-col items-center justify-center p-6 text-center space-y-2 text-white">
               <AlertCircle className="w-6 h-6 text-red-400" />
               <p className="text-xs text-stone-300 font-medium">
-                {errorMessage || 'Não foi possível reproduzir este vídeo.'}
+                {errorMessage || 'Não foi possível reproduzir este vídeo diretamente.'}
               </p>
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  retry();
-                }}
-                className="inline-flex items-center gap-1 text-xs font-semibold text-purple-300 bg-purple-900/60 hover:bg-purple-900 px-3 py-1.5 rounded-full cursor-pointer transition-colors border border-purple-500/40"
-              >
-                <RotateCw className="w-3 h-3" />
-                <span>Tentar novamente</span>
-              </button>
+              <div className="flex items-center gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setVideoError(false);
+                    retry();
+                  }}
+                  className="inline-flex items-center gap-1 text-xs font-semibold text-purple-300 bg-purple-900/60 hover:bg-purple-900 px-3 py-1.5 rounded-full cursor-pointer transition-colors border border-purple-500/40"
+                >
+                  <RotateCw className="w-3 h-3" />
+                  <span>Tentar novamente</span>
+                </button>
+                {mediaUrl && (
+                  <a
+                    href={mediaUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={(e) => e.stopPropagation()}
+                    className="inline-flex items-center gap-1 text-xs font-semibold text-stone-300 bg-stone-800 hover:bg-stone-700 px-3 py-1.5 rounded-full cursor-pointer transition-colors border border-stone-700"
+                  >
+                    <ExternalLink className="w-3 h-3" />
+                    <span>Abrir link</span>
+                  </a>
+                )}
+              </div>
             </div>
           )}
 
           {mediaUrl && (
-            <video
-              src={mediaUrl}
-              controls
-              playsInline
-              preload="metadata"
-              className={`w-full h-auto max-w-full object-contain ${
-                mode === 'detail' ? 'max-h-[70vh]' : 'max-h-60'
-              }`}
-              onClick={(e) => e.stopPropagation()}
-            >
-              Seu navegador não suporta reprodução de vídeo HTML5.
-            </video>
+            <div className="relative w-full h-full flex items-center justify-center">
+              <video
+                src={mediaUrl}
+                controls
+                playsInline
+                preload="auto"
+                className={`w-full h-auto max-w-full object-contain ${
+                  mode === 'detail' ? 'max-h-[70vh]' : 'max-h-60'
+                }`}
+                onClick={(e) => e.stopPropagation()}
+                onWaiting={() => setVideoBuffering(true)}
+                onPlaying={() => setVideoBuffering(false)}
+                onCanPlay={() => setVideoBuffering(false)}
+                onError={() => {
+                  setVideoBuffering(false);
+                  setVideoError(true);
+                }}
+              >
+                Seu navegador não suporta reprodução de vídeo HTML5.
+              </video>
+
+              {videoBuffering && (
+                <div className="absolute top-3 left-3 bg-stone-900/85 backdrop-blur-xs text-purple-300 text-[11px] font-medium px-2.5 py-1 rounded-full flex items-center gap-1.5 pointer-events-none shadow-sm z-10 border border-purple-500/30">
+                  <RotateCw className="w-3 h-3 animate-spin text-purple-400" />
+                  <span>Carregando transmissão...</span>
+                </div>
+              )}
+            </div>
           )}
         </div>
+
+        {/* Video Stream / Cache Status Bar */}
+        {mediaUrl && (
+          <div className="flex items-center justify-between text-xs px-1 text-stone-500">
+            <div className="flex items-center gap-1.5">
+              {isFromCache ? (
+                <span className="inline-flex items-center gap-1 text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md font-medium text-[11px]">
+                  <CheckCircle2 className="w-3 h-3" />
+                  Salvo no cache deste celular
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1 text-purple-700 bg-purple-50 px-2 py-0.5 rounded-md font-medium text-[11px]">
+                  <Radio className="w-3 h-3 animate-pulse text-purple-600" />
+                  Transmitindo da nuvem (Internet / Live)
+                </span>
+              )}
+            </div>
+
+            {/* Cache Button if viewing from internet */}
+            {!isFromCache && (
+              <button
+                type="button"
+                disabled={isDownloadingToCache}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  cacheLocally();
+                }}
+                className="inline-flex items-center gap-1 text-[11px] font-semibold text-stone-700 bg-stone-100 hover:bg-stone-200 px-2.5 py-1 rounded-md transition-colors cursor-pointer disabled:opacity-50"
+                title="Salvar vídeo no cache local para assistir offline"
+              >
+                {isDownloadingToCache ? (
+                  <>
+                    <RotateCw className="w-3 h-3 animate-spin text-purple-600" />
+                    <span>Baixando ({downloadProgress}%)...</span>
+                  </>
+                ) : (
+                  <>
+                    <DownloadCloud className="w-3 h-3 text-stone-600" />
+                    <span>Baixar pro cache</span>
+                  </>
+                )}
+              </button>
+            )}
+          </div>
+        )}
       </div>
     );
   }

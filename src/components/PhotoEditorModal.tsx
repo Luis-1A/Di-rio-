@@ -34,9 +34,12 @@ import {
 
 interface PhotoEditorModalProps {
   isOpen: boolean;
-  record: DiaryRecord;
-  imageUrl: string;
-  user: UserProfile;
+  record?: DiaryRecord | null;
+  sourceRecord?: DiaryRecord | null;
+  imageUrl?: string;
+  initialImageUrl?: string;
+  user?: UserProfile | null;
+  currentUser?: UserProfile | null;
   onClose: () => void;
   onSavedNewPhoto: (newRecord: DiaryRecord) => void;
 }
@@ -79,11 +82,18 @@ const COLOR_PALETTE = [
 export const PhotoEditorModal: React.FC<PhotoEditorModalProps> = ({
   isOpen,
   record,
+  sourceRecord,
   imageUrl,
+  initialImageUrl,
   user,
+  currentUser,
   onClose,
   onSavedNewPhoto,
 }) => {
+  const activeRecord = record || sourceRecord;
+  const activeImageUrl = imageUrl || initialImageUrl || '';
+  const activeUser = user || currentUser;
+
   const [activeTool, setActiveTool] = useState<EditorTool>('crop');
   const [cropRatio, setCropRatio] = useState<CropRatio>('free');
 
@@ -140,12 +150,12 @@ export const PhotoEditorModal: React.FC<PhotoEditorModalProps> = ({
 
   // Save Progress State
   const [isSaving, setIsSaving] = useState(false);
-  const [saveTitle, setSaveTitle] = useState(`${record.title || 'Foto'} (Editada)`);
+  const [saveTitle, setSaveTitle] = useState(`${activeRecord?.title || 'Foto'} (Editada)`);
   const [saveSuccessMsg, setSaveSuccessMsg] = useState<string | null>(null);
 
   // Initial Image Load & Canvas Setup
   useEffect(() => {
-    if (!isOpen || !imageUrl) return;
+    if (!isOpen || !activeImageUrl) return;
 
     const img = new Image();
     img.crossOrigin = 'anonymous';
@@ -167,10 +177,10 @@ export const PhotoEditorModal: React.FC<PhotoEditorModalProps> = ({
       setHistory([initialData]);
       setHistoryIndex(0);
       setAdjustments(DEFAULT_ADJUSTMENTS);
-      setSaveTitle(`${record.title || 'Foto'} (Editada)`);
+      setSaveTitle(`${activeRecord?.title || 'Foto'} (Editada)`);
     };
-    img.src = imageUrl;
-  }, [isOpen, imageUrl, record.title]);
+    img.src = activeImageUrl;
+  }, [isOpen, activeImageUrl, activeRecord?.title]);
 
   // Push Canvas State to History
   const pushState = useCallback(() => {
@@ -606,16 +616,17 @@ export const PhotoEditorModal: React.FC<PhotoEditorModalProps> = ({
       const timeStr = now.toTimeString().substring(0, 5);
 
       // Upload with guarantees using current pipeline
+      const targetUid = activeUser?.uid || 'offline_user';
       const savedRecord = await executeDirectSavePipeline({
-        uid: user.uid,
+        uid: targetUid,
         recordId: newRecordId,
         type: 'photo',
-        title: saveTitle.trim() || `${record.title || 'Foto'} (Editada)`,
-        content: `Editada a partir do registro "${record.title || 'Foto Original'}"`,
+        title: saveTitle.trim() || `${activeRecord?.title || 'Foto'} (Editada)`,
+        content: `Editada a partir do registro "${activeRecord?.title || 'Foto Original'}"`,
         date: dateStr,
         time: timeStr,
-        category: record.category || 'Fotos',
-        tags: [...(record.tags || []), 'editada'],
+        category: activeRecord?.category || 'Fotos',
+        tags: [...(activeRecord?.tags || []), 'editada'],
         fileOrBlob: blob,
       });
 
