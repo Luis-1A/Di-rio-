@@ -24,6 +24,7 @@ import { IAUProfileView } from './components/IAUProfileView';
 import { DiagnosticsModal } from './components/DiagnosticsModal';
 import { PDFViewerModal } from './components/PDFViewerModal';
 import { RecordDetailView } from './components/RecordDetailView';
+import { PhotoEditorModal } from './components/PhotoEditorModal';
 import { BookOpen, Loader2 } from 'lucide-react';
 
 const RECORDS_CACHE_KEY_PREFIX = 'diario_pessoal_records_cache_';
@@ -81,6 +82,32 @@ export default function App() {
     url: '',
     title: '',
   });
+
+  // Photo Editor Modal State
+  const [photoEditorData, setPhotoEditorData] = useState<{
+    isOpen: boolean;
+    record: DiaryRecord | null;
+    imageUrl: string;
+  }>({
+    isOpen: false,
+    record: null,
+    imageUrl: '',
+  });
+
+  const handleOpenPhotoEditor = (record: DiaryRecord, imageUrl: string) => {
+    setPhotoEditorData({
+      isOpen: true,
+      record,
+      imageUrl,
+    });
+  };
+
+  const handlePhotoEditorSaved = (newRecord: DiaryRecord) => {
+    setRecords((prev) => [newRecord, ...prev.filter((r) => r.id !== newRecord.id)]);
+    // Also display the new record
+    setViewingRecord(newRecord);
+    setActiveTab('view-record');
+  };
 
   // 1. Unified Auth state listener
   useEffect(() => {
@@ -318,6 +345,7 @@ export default function App() {
             onSelectRecord={handleOpenRecordForView}
             onViewAllRecords={() => setActiveTab('archive')}
             onOpenPdf={handleOpenPdf}
+            onEditPhoto={handleOpenPhotoEditor}
           />
         )}
 
@@ -328,6 +356,7 @@ export default function App() {
             onSelectRecord={handleOpenRecordForView}
             onNewRecord={handleStartNewRecord}
             onOpenPdf={handleOpenPdf}
+            onEditPhoto={handleOpenPhotoEditor}
           />
         )}
 
@@ -339,6 +368,7 @@ export default function App() {
             onEdit={handleStartEditFromView}
             onDeleted={handleRecordDeleted}
             onOpenPdf={handleOpenPdf}
+            onEditPhoto={handleOpenPhotoEditor}
           />
         )}
 
@@ -359,6 +389,7 @@ export default function App() {
             onSelectRecord={handleOpenRecordForView}
             onNewRecord={handleStartNewRecord}
             onOpenPdf={handleOpenPdf}
+            onEditPhoto={handleOpenPhotoEditor}
           />
         )}
 
@@ -388,6 +419,18 @@ export default function App() {
         fileName={pdfModalData.fileName}
         fileSize={pdfModalData.fileSize}
       />
+
+      {/* Integrated Photo Editor Modal */}
+      {photoEditorData.record && (
+        <PhotoEditorModal
+          isOpen={photoEditorData.isOpen}
+          onClose={() => setPhotoEditorData((prev) => ({ ...prev, isOpen: false }))}
+          sourceRecord={photoEditorData.record}
+          initialImageUrl={photoEditorData.imageUrl}
+          currentUser={currentUser}
+          onSavedNewPhoto={handlePhotoEditorSaved}
+        />
+      )}
 
       {/* System Diagnostics Modal */}
       <DiagnosticsModal

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { DiaryRecord, MemoryItem, UserProfile } from '../types';
-import { getLocalMediaBlob } from '../lib/idbStorage';
+import { MediaFeedRenderer } from './MediaFeedRenderer';
 import {
   Plus,
   FileText,
@@ -8,8 +8,6 @@ import {
   Mic,
   Video,
   File,
-  Play,
-  Pause,
   ArrowRight,
   Clock,
   Eye,
@@ -27,6 +25,7 @@ interface DashboardViewProps {
   onSelectRecord: (record: DiaryRecord) => void;
   onViewAllRecords: () => void;
   onOpenPdf?: (url: string, title: string, fileName?: string, size?: number) => void;
+  onEditPhoto?: (record: DiaryRecord, photoUrl: string) => void;
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
@@ -36,11 +35,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onSelectRecord,
   onViewAllRecords,
   onOpenPdf,
+  onEditPhoto,
 }) => {
   const activeRecords = records.filter((r) => !r.isDeleted);
   const recentRecords = activeRecords.slice(0, 10);
-  const [playingAudioId, setPlayingAudioId] = useState<string | null>(null);
-  const audioInstancesRef = React.useRef<Record<string, HTMLAudioElement>>({});
 
   const stats = {
     total: activeRecords.length,
@@ -148,40 +146,6 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       );
     } catch {
       return dateStr || '';
-    }
-  };
-
-  const toggleAudio = async (e: React.MouseEvent, recordId: string, audioUrl?: string) => {
-    e.stopPropagation();
-
-    let resolvedUrl = audioUrl;
-    if (!resolvedUrl) {
-      const stored = await getLocalMediaBlob(recordId);
-      if (stored && stored.blob) {
-        resolvedUrl = URL.createObjectURL(stored.blob);
-      }
-    }
-
-    if (!resolvedUrl) return;
-
-    if (playingAudioId === recordId) {
-      if (audioInstancesRef.current[recordId]) {
-        audioInstancesRef.current[recordId].pause();
-      }
-      setPlayingAudioId(null);
-    } else {
-      // Pause any existing
-      Object.values(audioInstancesRef.current).forEach((a) => {
-        if (a instanceof HTMLAudioElement) a.pause();
-      });
-
-      if (!audioInstancesRef.current[recordId]) {
-        audioInstancesRef.current[recordId] = new Audio(resolvedUrl);
-        audioInstancesRef.current[recordId].onended = () => setPlayingAudioId(null);
-      }
-
-      audioInstancesRef.current[recordId].play().catch(() => {});
-      setPlayingAudioId(recordId);
     }
   };
 
@@ -356,136 +320,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   </p>
                 )}
 
-                {/* Photo Preview */}
-                {(photoAttachment?.url || (record.type === 'photo' && (record.downloadUrl || record.thumbnailUrl))) && (
-                  <div className="rounded-2xl overflow-hidden border border-stone-200/80 bg-stone-900/5 max-h-72 relative flex items-center justify-center p-1">
-                    <img
-                      src={photoAttachment?.url || record.downloadUrl || record.thumbnailUrl}
-                      alt={record.title || 'Foto'}
-                      className="max-w-full max-h-72 w-auto h-auto object-contain rounded-xl group-hover:scale-[1.01] transition-transform duration-300"
-                      referrerPolicy="no-referrer"
-                      loading="lazy"
-                    />
-                    {record.uploadStatus === 'uploading' && (
-                      <span className="absolute bottom-2 right-2 px-2 py-0.5 rounded-md bg-stone-900/80 text-amber-300 text-[10px] font-medium flex items-center gap-1 backdrop-blur-xs shadow-xs">
-                        <RotateCw className="w-2.5 h-2.5 animate-spin" />
-                        Sincronizando
-                      </span>
-                    )}
-                  </div>
-                )}
-
-                {/* Video Preview */}
-                {(videoAttachment?.url || (record.type === 'video' && (record.downloadUrl || record.thumbnailUrl))) && (
-                  <div className="rounded-2xl overflow-hidden border border-stone-200/80 bg-stone-900 aspect-video max-h-56 relative group/vid flex items-center justify-center">
-                    {videoAttachment?.url || record.downloadUrl ? (
-                      <video
-                        src={videoAttachment?.url || record.downloadUrl}
-                        className="w-full h-full object-contain"
-                        controls
-                        preload="metadata"
-                      />
-                    ) : (
-                      <div className="relative w-full h-full flex items-center justify-center">
-                        <img
-                          src={record.thumbnailUrl}
-                          alt={record.title || 'Vídeo'}
-                          className="w-full h-full object-contain opacity-75"
-                        />
-                        <div className="absolute inset-0 bg-black/40 backdrop-blur-xs flex items-center justify-center gap-2 text-white">
-                          <RotateCw className="w-4 h-4 animate-spin text-amber-400" />
-                          <span className="text-xs font-medium">Sincronizando da nuvem...</span>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* Audio Waveform Player */}
-                {audioAttachment && (
-                  <div
-                    onClick={(e) =>
-                      toggleAudio(e, record.id, audioAttachment.url)
-                    }
-                    className="bg-stone-50 border border-stone-200/80 rounded-2xl p-3 flex items-center gap-3 hover:bg-orange-50/40 transition-colors"
-                  >
-                    <button
-                      type="button"
-                      className="w-8 h-8 rounded-full bg-orange-600 hover:bg-orange-700 text-white flex items-center justify-center shrink-0 shadow-xs cursor-pointer"
-                    >
-                      {playingAudioId === record.id ? (
-                        <Pause className="w-3.5 h-3.5 fill-current" />
-                      ) : (
-                        <Play className="w-3.5 h-3.5 fill-current ml-0.5" />
-                      )}
-                    </button>
-
-                    {/* Waveform graphic bars */}
-                    <div className="flex-1 flex items-center gap-0.5 h-6">
-                      {[
-                        30, 60, 45, 80, 50, 90, 70, 40, 60, 100, 75, 45, 85, 95,
-                        60, 40, 50, 80, 65, 35, 75, 90, 55, 30, 45, 60, 70, 40,
-                      ].map((h, i) => (
-                        <div
-                          key={i}
-                          className={`w-1 rounded-full transition-all ${
-                            playingAudioId === record.id && i % 3 === 0
-                              ? 'bg-orange-600 animate-pulse'
-                              : 'bg-stone-300'
-                          }`}
-                          style={{ height: `${h}%` }}
-                        />
-                      ))}
-                    </div>
-
-                    <span className="text-[11px] font-mono text-stone-500 shrink-0">
-                      {record.attachments?.[0]?.durationSeconds
-                        ? `00:${record.attachments[0].durationSeconds.toString().padStart(2, '0')}`
-                        : 'Áudio'}
-                    </span>
-                  </div>
-                )}
-
-                {/* PDF & Document Row */}
-                {docAttachment && (
-                  <div className="bg-stone-50 border border-stone-200/80 rounded-2xl p-3 flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-3 min-w-0">
-                      <div className="w-9 h-9 rounded-xl bg-orange-50 border border-orange-100 flex items-center justify-center text-orange-600 shrink-0">
-                        <File className="w-4 h-4" />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-xs font-semibold text-stone-800 truncate">
-                          {docAttachment.name || 'Documento em anexo'}
-                        </p>
-                        <p className="text-[10px] text-stone-400">
-                          {isPDF ? 'Documento PDF' : 'Arquivo'} •{' '}
-                          {docAttachment.size
-                            ? `${(docAttachment.size / (1024 * 1024)).toFixed(2)} MB`
-                            : 'Arquivo salvo'}
-                        </p>
-                      </div>
-                    </div>
-
-                    {isPDF && onOpenPdf && (
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onOpenPdf(
-                            docAttachment.url,
-                            record.title || docAttachment.name || 'Documento PDF',
-                            docAttachment.name,
-                            docAttachment.size
-                          );
-                        }}
-                        className="px-3 py-1.5 bg-orange-600 hover:bg-orange-700 text-white rounded-xl text-xs font-semibold transition-colors flex items-center gap-1 cursor-pointer shrink-0 shadow-xs"
-                      >
-                        <Eye className="w-3.5 h-3.5" />
-                        <span>Abrir PDF</span>
-                      </button>
-                    )}
-                  </div>
-                )}
+                {/* Media Presentation (Accelerated, Zero Crop, Direct Streaming) */}
+                <MediaFeedRenderer
+                  record={record}
+                  onOpenPdf={onOpenPdf}
+                  onEditPhoto={onEditPhoto}
+                  mode="feed"
+                />
               </div>
             );
           })}

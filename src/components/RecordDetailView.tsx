@@ -4,6 +4,7 @@ import { getLocalMediaBlob } from '../lib/idbStorage';
 import { permanentlyDeleteRecord } from '../lib/firestoreService';
 import { deleteLocalMediaBlob } from '../lib/idbStorage';
 import { verifyAccountPassword } from '../lib/authService';
+import { MediaFeedRenderer } from './MediaFeedRenderer';
 import {
   ArrowLeft,
   Edit3,
@@ -31,6 +32,7 @@ import {
   X,
   Share2,
   RotateCw,
+  Wand2,
 } from 'lucide-react';
 
 interface RecordDetailViewProps {
@@ -40,6 +42,7 @@ interface RecordDetailViewProps {
   onEdit: (record: DiaryRecord) => void;
   onDeleted: (recordId: string) => void;
   onOpenPdf?: (url: string, title: string, fileName?: string, size?: number) => void;
+  onEditPhoto?: (record: DiaryRecord, photoUrl: string) => void;
 }
 
 export const RecordDetailView: React.FC<RecordDetailViewProps> = ({
@@ -49,6 +52,7 @@ export const RecordDetailView: React.FC<RecordDetailViewProps> = ({
   onEdit,
   onDeleted,
   onOpenPdf,
+  onEditPhoto,
 }) => {
   // Media URLs with local fallback
   const [resolvedMediaUrls, setResolvedMediaUrls] = useState<Record<string, string>>({});
@@ -272,6 +276,19 @@ export const RecordDetailView: React.FC<RecordDetailViewProps> = ({
         </button>
 
         <div className="flex items-center gap-2">
+          {/* Photo Editor Button (When record is a photo) */}
+          {record.type === 'photo' && onEditPhoto && (
+            <button
+              type="button"
+              onClick={() => onEditPhoto(record, primaryUrl || record.thumbnailUrl || '')}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-sm font-semibold text-white bg-stone-900 hover:bg-stone-800 rounded-xl transition-all shadow-xs cursor-pointer active:scale-95"
+              title="Abrir editor de fotos integrado"
+            >
+              <Wand2 className="w-4 h-4 text-amber-300" />
+              <span>Editar foto</span>
+            </button>
+          )}
+
           {/* Edit Button */}
           <button
             type="button"
@@ -365,14 +382,28 @@ export const RecordDetailView: React.FC<RecordDetailViewProps> = ({
                 style={{ imageOrientation: 'from-image' }}
               />
 
-              <button
-                type="button"
-                onClick={() => setFullscreenImage(primaryUrl || record.thumbnailUrl || '')}
-                className="absolute top-4 right-4 p-2 bg-black/60 hover:bg-black/80 text-white rounded-xl backdrop-blur-xs opacity-90 group-hover:opacity-100 transition-opacity cursor-pointer shadow-md"
-                title="Ver em tela cheia"
-              >
-                <Maximize2 className="w-4 h-4" />
-              </button>
+              <div className="absolute top-4 right-4 flex items-center gap-2">
+                {onEditPhoto && (
+                  <button
+                    type="button"
+                    onClick={() => onEditPhoto(record, primaryUrl || record.thumbnailUrl || '')}
+                    className="p-2 bg-black/70 hover:bg-black/90 text-white rounded-xl backdrop-blur-xs transition-all cursor-pointer shadow-md flex items-center gap-1.5 text-xs font-semibold"
+                    title="Editar foto no sistema"
+                  >
+                    <Wand2 className="w-4 h-4 text-amber-300" />
+                    <span>Editar</span>
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => setFullscreenImage(primaryUrl || record.thumbnailUrl || '')}
+                  className="p-2 bg-black/60 hover:bg-black/80 text-white rounded-xl backdrop-blur-xs opacity-90 group-hover:opacity-100 transition-opacity cursor-pointer shadow-md"
+                  title="Ver em tela cheia"
+                >
+                  <Maximize2 className="w-4 h-4" />
+                </button>
+              </div>
             </div>
             {primaryAttachment?.name && (
               <p className="text-xs text-stone-500 mt-2 text-center font-mono">
@@ -383,12 +414,12 @@ export const RecordDetailView: React.FC<RecordDetailViewProps> = ({
         )}
 
         {/* Video Player: Zero-crop, full controls */}
-        {record.type === 'video' && (primaryUrl || record.thumbnailUrl) && (
+        {record.type === 'video' && (primaryUrl || record.downloadUrl || record.thumbnailUrl) && (
           <div className="pt-2">
             <div className="bg-black rounded-2xl overflow-hidden shadow-sm flex items-center justify-center min-h-[240px] relative">
-              {primaryUrl ? (
+              {primaryUrl || record.downloadUrl ? (
                 <video
-                  src={primaryUrl}
+                  src={primaryUrl || record.downloadUrl}
                   controls
                   playsInline
                   preload="metadata"
@@ -405,10 +436,7 @@ export const RecordDetailView: React.FC<RecordDetailViewProps> = ({
                   />
                   <div className="absolute inset-0 bg-black/50 backdrop-blur-xs flex flex-col items-center justify-center gap-2.5 text-white p-4 text-center">
                     <RotateCw className="w-6 h-6 animate-spin text-amber-400" />
-                    <p className="text-sm font-bold">Sincronizando vídeo da nuvem...</p>
-                    <p className="text-xs text-stone-300 max-w-xs leading-relaxed">
-                      A prévia já está disponível. O vídeo completo estará pronto para reprodução em instantes.
-                    </p>
+                    <p className="text-sm font-bold">Carregando vídeo da nuvem...</p>
                   </div>
                 </div>
               )}

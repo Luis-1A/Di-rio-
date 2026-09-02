@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react';
 import { DiaryRecord, UserProfile } from '../types';
+import { MediaFeedRenderer } from './MediaFeedRenderer';
 import {
   Calendar,
   FileText,
@@ -18,6 +19,7 @@ interface TimelineViewProps {
   onSelectRecord: (record: DiaryRecord) => void;
   onNewRecord: () => void;
   onOpenPdf?: (url: string, title: string, fileName?: string, size?: number) => void;
+  onEditPhoto?: (record: DiaryRecord, photoUrl: string) => void;
 }
 
 interface TimelineItem {
@@ -35,6 +37,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
   onSelectRecord,
   onNewRecord,
   onOpenPdf,
+  onEditPhoto,
 }) => {
   // Group active records into date-sorted timeline
   const groupedTimeline = useMemo(() => {
@@ -221,54 +224,13 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                         </p>
                       )}
 
-                      {(photoAtt?.url || (rec.type === 'photo' && (rec.downloadUrl || rec.thumbnailUrl))) && (
-                        <div className="rounded-xl overflow-hidden bg-stone-100 aspect-video max-h-48 border border-stone-200/60 flex items-center justify-center">
-                          <img
-                            src={photoAtt?.url || rec.downloadUrl || rec.thumbnailUrl}
-                            alt={rec.title || 'Foto'}
-                            className="w-full h-full object-cover"
-                            referrerPolicy="no-referrer"
-                          />
-                        </div>
-                      )}
-
-                      {rec.type === 'video' && (rec.downloadUrl || rec.thumbnailUrl) && (
-                        <div className="rounded-xl overflow-hidden bg-stone-900 aspect-video max-h-48 border border-stone-200/60 relative flex items-center justify-center">
-                          {rec.thumbnailUrl ? (
-                            <img
-                              src={rec.thumbnailUrl}
-                              alt={rec.title || 'Vídeo'}
-                              className="w-full h-full object-cover opacity-80"
-                            />
-                          ) : (
-                            <video
-                              src={rec.downloadUrl}
-                              className="w-full h-full object-cover opacity-75"
-                            />
-                          )}
-                        </div>
-                      )}
-
-                      {isPDF && docAtt && onOpenPdf && (
-                        <div className="pt-1">
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              onOpenPdf(
-                                docAtt.url,
-                                rec.title || docAtt.name || 'Documento PDF',
-                                docAtt.name,
-                                docAtt.size
-                              );
-                            }}
-                            className="px-3 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-800 rounded-xl text-xs font-semibold transition-colors flex items-center gap-1.5 cursor-pointer"
-                          >
-                            <Eye className="w-3.5 h-3.5" />
-                            <span>Abrir Documento PDF</span>
-                          </button>
-                        </div>
-                      )}
+                      {/* Media Presentation */}
+                      <MediaFeedRenderer
+                        record={rec}
+                        onOpenPdf={onOpenPdf}
+                        onEditPhoto={onEditPhoto}
+                        mode="feed"
+                      />
                     </div>
                   );
                 })}
