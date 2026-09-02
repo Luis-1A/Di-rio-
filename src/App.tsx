@@ -24,8 +24,6 @@ import { IAUProfileView } from './components/IAUProfileView';
 import { DiagnosticsModal } from './components/DiagnosticsModal';
 import { PDFViewerModal } from './components/PDFViewerModal';
 import { RecordDetailView } from './components/RecordDetailView';
-import { GlobalSyncIndicator } from './components/GlobalSyncIndicator';
-import { processBackgroundUploadQueue } from './lib/backgroundUploadManager';
 import { BookOpen, Loader2 } from 'lucide-react';
 
 const RECORDS_CACHE_KEY_PREFIX = 'diario_pessoal_records_cache_';
@@ -174,7 +172,6 @@ export default function App() {
           });
         }
         await flushSyncQueue(uid);
-        await processBackgroundUploadQueue(uid);
       } catch (err) {
         console.warn('[RECONCILIATION] Background check warning:', err);
       }
@@ -391,9 +388,6 @@ export default function App() {
         fileName={pdfModalData.fileName}
         fileSize={pdfModalData.fileSize}
       />
-
-      {/* Global Background Upload & Sync Indicator */}
-      {currentUser && <GlobalSyncIndicator userId={currentUser.uid} />}
 
       {/* System Diagnostics Modal */}
       <DiagnosticsModal

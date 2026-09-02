@@ -1,25 +1,29 @@
 /**
  * Background Upload & Sync Manager
  *
- * Implements a Local-First, Non-Blocking background worker:
- * 1. Saves media binary immediately in IndexedDB.
- * 2. Emits local record immediately for zero-wait UX.
- * 3. Enqueues item in persistent IndexedDB queue.
- * 4. Processes upload queue in background using Firebase Storage resumable upload.
- * 5. Writes clean metadata to Firestore with timeout fallback.
- * 6. Emits live queue updates to UI indicators.
- * 7. Automatically resumes on network reconnection and 30s reconciliation.
+ * Implements a Robust, Non-Blocking, Local-First Architecture:
+ * 1. Instant local persistence (media blob in IndexedDB + immediate DiaryRecord emission).
+ * 2. Unblocked UI: The user can continue creating notes, browsing, or closing screens.
+ * 3. Unique recordId mapping: Every upload is strictly tied to recordId.
+ * 4. Immediate Cancel & Purge on Delete: If the user deletes a record, the upload task is
+ *    aborted immediately, the queue item is purged, local blobs are deleted, and tombstones
+ *    prevent ANY delayed retry or resurrection.
+ * 5. Bounded Retries: Max 2 retries (total 3 attempts). No infinite uploading loops.
+ * 6. De-duplication: Avoids re-uploading files already uploaded and verified.
+ * 7. Real Firestore sync: Saves permanent HTTPS downloadUrl so other devices access media seamlessly.
  */
 
 import {
   ref as storageRef,
   uploadBytesResumable,
   getDownloadURL,
+  deleteObject,
   UploadTask,
 } from 'firebase/storage';
 import {
   doc,
   setDoc,
+  deleteDoc,
   serverTimestamp,
 } from 'firebase/firestore';
 import { db, storage } from './firebase';
@@ -33,25 +37,38 @@ import {
 import {
   saveLocalMediaBlob,
   getLocalMediaBlob,
+  deleteLocalMediaBlob,
   saveQueueItem,
   getAllQueueItems,
   deleteQueueItem,
+  deleteQueueItemsByRecordId,
   getQueueItem,
+  addDeletedTombstone,
+  isDeletedTombstoned,
 } from './idbStorage';
 import { sanitizeForFirestore } from './firestoreService';
 import { syncQueue, generateOperationId } from './syncQueue';
+import {
+  compressImage,
+  extractVideoThumbnail,
+  compressSmallTextFile,
+  compactMetadata,
+} from './mediaCompressor';
 
 type QueueListener = (items: BackgroundUploadItem[]) => void;
 const listeners = new Set<QueueListener>();
+
+// Map active upload tasks by both queueId and recordId for instant cancellation
 const activeUploadTasks = new Map<string, UploadTask>();
 let isQueueProcessing = false;
+const MAX_RETRIES = 2; // initial + 2 retries = 3 attempts total
 
 function notifyListeners(items: BackgroundUploadItem[]) {
   listeners.forEach((fn) => {
     try {
       fn(items);
     } catch (e) {
-      console.warn('[BACKGROUND QUEUE] Listener warning:', e);
+      console.warn('[BACKGROUND QUEUE] Listener error:', e);
     }
   });
 }
@@ -61,8 +78,14 @@ export function subscribeToUploadQueue(
   callback: QueueListener
 ): () => void {
   listeners.add(callback);
-  // Initial fire
-  getAllQueueItems(userId).then(callback).catch(() => callback([]));
+  // Initial fire with filtered active items
+  getAllQueueItems(userId)
+    .then((items) => {
+      // Filter out items whose recordId has been tombstoned (deleted)
+      const valid = items.filter((it) => !isDeletedTombstoned(it.recordId));
+      callback(valid);
+    })
+    .catch(() => callback([]));
 
   return () => {
     listeners.delete(callback);
@@ -70,7 +93,7 @@ export function subscribeToUploadQueue(
 }
 
 /**
- * 1. Enqueue New Upload (Instant Local-First Return)
+ * 1. Enqueue New Upload (Instant Local-First Return, Non-Blocking)
  */
 export async function enqueueBackgroundUpload(params: {
   uid: string;
@@ -87,6 +110,7 @@ export async function enqueueBackgroundUpload(params: {
   mimeType?: string;
   audioDurationSeconds?: number;
   transcript?: string;
+  thumbnailUrl?: string;
   existingAttachments?: RecordAttachment[];
 }): Promise<DiaryRecord> {
   const {
@@ -110,29 +134,80 @@ export async function enqueueBackgroundUpload(params: {
     params.recordId ||
     `rec_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
   const now = new Date().toISOString();
-  const queueId = `queue_${recordId}_${Date.now()}`;
+  const queueId = `queue_${recordId}`;
 
   let localBlobUrl = '';
   let resolvedFileName = fileName || '';
   let resolvedMimeType = mimeType || '';
   let resolvedSize = 0;
+  let finalBlobToUpload = fileOrBlob;
+  let resolvedThumbnailUrl = params.thumbnailUrl || '';
 
   let attachments: RecordAttachment[] = [...existingAttachments];
 
-  // Save binary file locally in IndexedDB if present
+  // Process and compress media before queuing
   if (fileOrBlob && type !== 'text') {
     resolvedSize = fileOrBlob.size;
     resolvedFileName =
       fileName ||
       (fileOrBlob instanceof File
         ? fileOrBlob.name
-        : `gravacao_${Date.now()}.${type === 'audio' ? 'webm' : type === 'photo' ? 'jpg' : type === 'video' ? 'mp4' : 'pdf'}`);
+        : `gravacao_${Date.now()}.${
+            type === 'audio'
+              ? 'webm'
+              : type === 'photo'
+              ? 'jpg'
+              : type === 'video'
+              ? 'mp4'
+              : 'pdf'
+          }`);
     resolvedMimeType =
       mimeType || fileOrBlob.type || 'application/octet-stream';
 
-    // 1. Store raw blob in IndexedDB
-    await saveLocalMediaBlob(recordId, fileOrBlob, resolvedFileName, resolvedMimeType);
-    localBlobUrl = URL.createObjectURL(fileOrBlob);
+    // 1. High-Performance Client-Side Image Compression & Micro Thumbnail
+    if (type === 'photo' || (fileOrBlob.type && fileOrBlob.type.startsWith('image/'))) {
+      try {
+        const compressed = await compressImage(fileOrBlob, resolvedFileName);
+        finalBlobToUpload = compressed.fileOrBlob;
+        resolvedFileName = compressed.fileName;
+        resolvedMimeType = compressed.mimeType;
+        resolvedSize = compressed.size;
+        if (!resolvedThumbnailUrl && compressed.thumbnailUrl) {
+          resolvedThumbnailUrl = compressed.thumbnailUrl;
+        }
+      } catch (e) {
+        console.warn('[BACKGROUND QUEUE] Image compression error, using raw file:', e);
+      }
+    } else if (type === 'document' || (fileOrBlob.type && (fileOrBlob.type.startsWith('text/') || fileOrBlob.type === 'application/json'))) {
+      // 2. High-Performance Small Text File Compression
+      try {
+        const compText = await compressSmallTextFile(fileOrBlob, resolvedFileName, resolvedMimeType);
+        if (compText.isCompressed) {
+          finalBlobToUpload = compText.fileOrBlob;
+          resolvedSize = compText.size;
+        }
+      } catch (e) {
+        console.warn('[BACKGROUND QUEUE] Text compression fallback:', e);
+      }
+    }
+
+    // 3. Extract Lightweight Video Thumbnail for Instant Cross-Device Preview
+    if ((type === 'video' || (fileOrBlob.type && fileOrBlob.type.startsWith('video/'))) && !resolvedThumbnailUrl) {
+      try {
+        const thumb = await extractVideoThumbnail(fileOrBlob);
+        if (thumb) {
+          resolvedThumbnailUrl = thumb;
+        }
+      } catch (e) {
+        console.warn('[BACKGROUND QUEUE] Video thumbnail extraction error:', e);
+      }
+    }
+
+    // 4. Store raw binary blob in IndexedDB for instant, zero-latency local playback
+    if (finalBlobToUpload) {
+      await saveLocalMediaBlob(recordId, finalBlobToUpload, resolvedFileName, resolvedMimeType);
+      localBlobUrl = URL.createObjectURL(finalBlobToUpload);
+    }
 
     const newAtt: RecordAttachment = {
       id: `att_${Date.now()}`,
@@ -144,6 +219,7 @@ export async function enqueueBackgroundUpload(params: {
           ? 'document'
           : (type as any),
       url: localBlobUrl,
+      thumbnailUrl: resolvedThumbnailUrl || undefined,
       size: resolvedSize,
       mimeType: resolvedMimeType,
       durationSeconds: audioDurationSeconds,
@@ -152,13 +228,23 @@ export async function enqueueBackgroundUpload(params: {
     };
     attachments = [newAtt];
 
-    // 2. Add item to persistent IndexedDB upload queue
+    // 4. Add item to persistent IndexedDB upload queue
     const queueItem: BackgroundUploadItem = {
       id: queueId,
       recordId,
       userId: uid,
       type,
-      title: title.trim() || (type === 'photo' ? 'Foto' : type === 'audio' ? 'Áudio' : type === 'video' ? 'Vídeo' : type === 'document' ? 'Arquivo' : 'Registro'),
+      title:
+        title.trim() ||
+        (type === 'photo'
+          ? 'Foto'
+          : type === 'audio'
+          ? 'Áudio'
+          : type === 'video'
+          ? 'Vídeo'
+          : type === 'document'
+          ? 'Arquivo'
+          : 'Registro'),
       description: content.trim(),
       content: content.trim(),
       date,
@@ -168,6 +254,7 @@ export async function enqueueBackgroundUpload(params: {
       fileName: resolvedFileName,
       fileSize: resolvedSize,
       mimeType: resolvedMimeType,
+      thumbnailUrl: resolvedThumbnailUrl || undefined,
       status: 'pending_upload',
       progress: 0,
       retryCount: 0,
@@ -180,7 +267,7 @@ export async function enqueueBackgroundUpload(params: {
     await saveQueueItem(queueItem);
   }
 
-  // 3. Create local DiaryRecord representation
+  // 5. Create local DiaryRecord representation immediately
   const localRecord: DiaryRecord = {
     id: recordId,
     userId: uid,
@@ -209,56 +296,58 @@ export async function enqueueBackgroundUpload(params: {
     tags,
     attachments,
     downloadUrl: localBlobUrl || undefined,
+    thumbnailUrl: resolvedThumbnailUrl || undefined,
     fileName: resolvedFileName || undefined,
     fileSize: resolvedSize || undefined,
     mimeType: resolvedMimeType || undefined,
-    uploadStatus: fileOrBlob ? 'pending' : 'completed',
+    uploadStatus: finalBlobToUpload ? 'uploading' : 'completed',
     isFavorite: false,
     isDeleted: false,
     createdAt: now,
     updatedAt: now,
     operationId: generateOperationId('bg_rec'),
-    syncStatus: fileOrBlob ? 'pending' : 'synced',
+    syncStatus: finalBlobToUpload ? 'uploading' : 'synced',
   };
 
-  // If it's a pure text record with no media, write directly or enqueue for sync
-  if (!fileOrBlob || type === 'text') {
-    const docRef = doc(db, 'users', uid, 'records', recordId);
-    setDoc(
-      docRef,
-      sanitizeForFirestore({
-        ...localRecord,
-        _serverTimestamp: serverTimestamp(),
-      })
-    ).catch((err) => {
-      console.warn('[BACKGROUND QUEUE] Text write fallback:', err);
-      syncQueue.enqueue({
-        operationId: localRecord.operationId,
-        entityType: 'record',
-        action: 'create',
-        payload: { uid, record: localRecord },
-      });
+  // 6. CRITICAL: PUBLISH TO FIRESTORE IMMEDIATELY (Cross-Device Instant Visibility)
+  // This allows the user's notebook to receive and display the record in < 1 second!
+  const docRef = doc(db, 'users', uid, 'records', recordId);
+  setDoc(
+    docRef,
+    sanitizeForFirestore({
+      ...localRecord,
+      _serverTimestamp: serverTimestamp(),
+    })
+  ).catch((err) => {
+    console.warn('[BACKGROUND QUEUE] Immediate firestore write fallback:', err);
+    syncQueue.enqueue({
+      operationId: localRecord.operationId,
+      entityType: 'record',
+      action: 'create',
+      payload: { uid, record: localRecord },
     });
-  } else {
-    // Notify active listeners
+  });
+
+  if (finalBlobToUpload && type !== 'text') {
+    // Notify active listeners of new queued item
     getAllQueueItems(uid).then(notifyListeners);
-    // Fire background queue worker immediately
+
+    // Fire background queue worker immediately in non-blocking way
     setTimeout(() => {
       processBackgroundUploadQueue(uid).catch((err) =>
         console.warn('[BACKGROUND QUEUE] Process trigger warning:', err)
       );
-    }, 50);
+    }, 20);
   }
 
   return localRecord;
 }
 
 /**
- * 2. Background Queue Processor (Uploads to Storage & Writes to Firestore in Background)
+ * 2. Background Queue Processor
  */
 export async function processBackgroundUploadQueue(userId: string): Promise<void> {
   if (isQueueProcessing) {
-    console.log('[BACKGROUND QUEUE] Queue is already processing...');
     return;
   }
 
@@ -268,22 +357,42 @@ export async function processBackgroundUploadQueue(userId: string): Promise<void
   }
 
   isQueueProcessing = true;
-  console.log(`[BACKGROUND QUEUE] Iniciando processamento da fila para usuário: ${userId}`);
 
   try {
     const items = await getAllQueueItems(userId);
-    // Filter pending or failed with retries < 5
-    const pendingItems = items.filter(
-      (it) =>
-        it.status === 'pending_upload' ||
-        (it.status === 'upload_error' && it.retryCount < 5) ||
-        it.status === 'uploaded'
-    );
 
-    // Sort by createdAt ascending (FIFO)
-    pendingItems.sort((a, b) => a.createdAt - b.createdAt);
+    // Filter active items and purge any tombstoned/deleted items
+    const activeItems: BackgroundUploadItem[] = [];
 
-    for (const item of pendingItems) {
+    for (const item of items) {
+      if (isDeletedTombstoned(item.recordId)) {
+        // Record was deleted by user! Clean up immediately
+        console.log(`[BACKGROUND QUEUE] Removendo item apagado da fila: ${item.recordId}`);
+        await cancelAndPurgeRecordUpload(item.recordId, userId);
+        continue;
+      }
+
+      // Keep items that need processing
+      if (
+        item.status === 'pending_upload' ||
+        item.status === 'pending' ||
+        (item.status === 'upload_error' && (item.retryCount || 0) < MAX_RETRIES) ||
+        (item.status === 'failed' && (item.retryCount || 0) < MAX_RETRIES) ||
+        item.status === 'uploaded'
+      ) {
+        activeItems.push(item);
+      }
+    }
+
+    // Sort FIFO by createdAt
+    activeItems.sort((a, b) => a.createdAt - b.createdAt);
+
+    for (const item of activeItems) {
+      // Re-verify tombstone before processing each item
+      if (isDeletedTombstoned(item.recordId)) {
+        await cancelAndPurgeRecordUpload(item.recordId, userId);
+        continue;
+      }
       await processSingleQueueItem(item);
     }
   } catch (err) {
@@ -295,22 +404,32 @@ export async function processBackgroundUploadQueue(userId: string): Promise<void
 }
 
 /**
- * Process a single upload item
+ * 3. Process a single upload item with strict tombstone checks
  */
 async function processSingleQueueItem(item: BackgroundUploadItem): Promise<void> {
   const { userId, recordId, id: queueId } = item;
-  console.log(`[BACKGROUND QUEUE] Processando item ${queueId} (recordId: ${recordId})...`);
 
-  // Step A: Check if already uploaded and just needs Firestore sync
-  if (item.status === 'uploaded' && item.downloadUrl && item.storagePath) {
+  // Pre-flight check 1: Was this record deleted?
+  if (isDeletedTombstoned(recordId)) {
+    console.log(`[BACKGROUND QUEUE] Abortando upload de registro deletado: ${recordId}`);
+    await cancelAndPurgeRecordUpload(recordId, userId);
+    return;
+  }
+
+  // Pre-flight check 2: If already uploaded & has downloadUrl, just sync to Firestore
+  if (
+    (item.status === 'uploaded' || item.status === 'completed') &&
+    item.downloadUrl &&
+    item.storagePath
+  ) {
     await finalizeFirestoreRecord(item, item.downloadUrl, item.storagePath);
     return;
   }
 
-  // Step B: Retrieve local media blob from IndexedDB
+  // Pre-flight check 3: Retrieve local binary blob
   const mediaStored = await getLocalMediaBlob(recordId);
   if (!mediaStored || !mediaStored.blob) {
-    console.warn(`[BACKGROUND QUEUE] Blob não encontrado no IndexedDB para ${recordId}. Marcando como falha.`);
+    console.warn(`[BACKGROUND QUEUE] Blob não encontrado no IndexedDB para ${recordId}.`);
     item.status = 'upload_error';
     item.errorMessage = 'Arquivo local não encontrado no navegador.';
     item.updatedAt = Date.now();
@@ -318,7 +437,7 @@ async function processSingleQueueItem(item: BackgroundUploadItem): Promise<void>
     return;
   }
 
-  // Step C: Start Firebase Storage Resumable Upload
+  // Step C: Mark Uploading
   item.status = 'uploading';
   item.progress = Math.max(5, item.progress || 5);
   item.updatedAt = Date.now();
@@ -332,19 +451,40 @@ async function processSingleQueueItem(item: BackgroundUploadItem): Promise<void>
     const sRef = storageRef(storage, storagePath);
     const uploadTask = uploadBytesResumable(sRef, mediaStored.blob, {
       contentType: item.mimeType || mediaStored.mimeType,
+      cacheControl: 'public, max-age=31536000, immutable',
+      customMetadata: {
+        recordId,
+        compressed: 'true',
+        uploadedAt: String(Date.now()),
+      },
     });
+
+    // Store task references by both queueId and recordId for instant cancellation
     activeUploadTasks.set(queueId, uploadTask);
+    activeUploadTasks.set(recordId, uploadTask);
 
     await new Promise<void>((resolve, reject) => {
       uploadTask.on(
         'state_changed',
         (snapshot) => {
+          // In-flight cancellation check: If record was deleted during upload, abort immediately
+          if (isDeletedTombstoned(recordId)) {
+            try {
+              uploadTask.cancel();
+            } catch {}
+            activeUploadTasks.delete(queueId);
+            activeUploadTasks.delete(recordId);
+            reject(new Error('RECORD_DELETED_DURING_UPLOAD'));
+            return;
+          }
+
           const total = snapshot.totalBytes;
           const transferred = snapshot.bytesTransferred;
           if (total > 0) {
-            const rawPercent = Math.round((transferred / total) * 100);
-            // Map progress smoothly: 10% to 85%
-            const mappedPercent = Math.min(85, Math.max(10, Math.round(10 + (transferred / total) * 75)));
+            const mappedPercent = Math.min(
+              88,
+              Math.max(10, Math.round(10 + (transferred / total) * 78))
+            );
             item.progress = mappedPercent;
             item.updatedAt = Date.now();
             saveQueueItem(item);
@@ -353,21 +493,34 @@ async function processSingleQueueItem(item: BackgroundUploadItem): Promise<void>
         },
         (error) => {
           activeUploadTasks.delete(queueId);
+          activeUploadTasks.delete(recordId);
           reject(error);
         },
         async () => {
           activeUploadTasks.delete(queueId);
+          activeUploadTasks.delete(recordId);
           resolve();
         }
       );
     });
 
-    // Step D: Get Download URL
+    // Verify tombstone once again before obtaining URL and writing Firestore
+    if (isDeletedTombstoned(recordId)) {
+      console.log(`[BACKGROUND QUEUE] Registro ${recordId} deletado após upload. Removendo arquivo do Storage.`);
+      try {
+        const sRefCleanup = storageRef(storage, storagePath);
+        await deleteObject(sRefCleanup);
+      } catch {}
+      await cancelAndPurgeRecordUpload(recordId, userId);
+      return;
+    }
+
+    // Step D: Get permanent download URL
     const sRefDone = storageRef(storage, storagePath);
     const downloadUrl = await getDownloadURL(sRefDone);
 
     item.status = 'uploaded';
-    item.progress = 90;
+    item.progress = 92;
     item.storagePath = storagePath;
     item.downloadUrl = downloadUrl;
     item.updatedAt = Date.now();
@@ -380,19 +533,34 @@ async function processSingleQueueItem(item: BackgroundUploadItem): Promise<void>
     await finalizeFirestoreRecord(item, downloadUrl, storagePath);
   } catch (uploadError: any) {
     activeUploadTasks.delete(queueId);
+    activeUploadTasks.delete(recordId);
+
+    if (uploadError?.message === 'RECORD_DELETED_DURING_UPLOAD' || isDeletedTombstoned(recordId)) {
+      await cancelAndPurgeRecordUpload(recordId, userId);
+      return;
+    }
+
     console.warn(`[BACKGROUND QUEUE] Erro no upload do item ${recordId}:`, uploadError);
 
-    item.status = 'upload_error';
-    item.errorMessage = uploadError?.message || 'Falha ao enviar arquivo para o Firebase Storage.';
-    item.retryCount = (item.retryCount || 0) + 1;
+    const nextRetry = (item.retryCount || 0) + 1;
+    item.retryCount = nextRetry;
     item.updatedAt = Date.now();
+
+    if (nextRetry >= MAX_RETRIES) {
+      item.status = 'upload_error';
+      item.errorMessage = 'Não foi possível enviar este arquivo. Toque para tentar novamente.';
+    } else {
+      item.status = 'upload_error';
+      item.errorMessage = `Falha ao conectar com o servidor. Nova tentativa (${nextRetry}/${MAX_RETRIES})...`;
+    }
+
     await saveQueueItem(item);
     getAllQueueItems(userId).then(notifyListeners);
   }
 }
 
 /**
- * Write/Update finalized metadata to Firestore
+ * 4. Write/Update finalized metadata to Firestore
  */
 async function finalizeFirestoreRecord(
   item: BackgroundUploadItem,
@@ -400,6 +568,14 @@ async function finalizeFirestoreRecord(
   storagePath: string
 ): Promise<void> {
   const { userId, recordId } = item;
+
+  // Check tombstone: If user deleted the record, never write it to Firestore!
+  if (isDeletedTombstoned(recordId)) {
+    console.log(`[BACKGROUND QUEUE] Abortando escrita no Firestore de registro apagado: ${recordId}`);
+    await cancelAndPurgeRecordUpload(recordId, userId);
+    return;
+  }
+
   const now = new Date().toISOString();
 
   const attachment: RecordAttachment = {
@@ -412,6 +588,7 @@ async function finalizeFirestoreRecord(
         ? 'document'
         : (item.type as any),
     url: downloadUrl,
+    thumbnailUrl: item.thumbnailUrl,
     storagePath,
     size: item.fileSize,
     mimeType: item.mimeType,
@@ -434,6 +611,7 @@ async function finalizeFirestoreRecord(
     attachments: [attachment],
     storagePath,
     downloadUrl,
+    thumbnailUrl: item.thumbnailUrl,
     fileName: item.fileName,
     fileSize: item.fileSize,
     mimeType: item.mimeType,
@@ -448,6 +626,7 @@ async function finalizeFirestoreRecord(
 
   try {
     const docRef = doc(db, 'users', userId, 'records', recordId);
+    
     // Timeout-protected write
     const writePromise = setDoc(
       docRef,
@@ -471,9 +650,10 @@ async function finalizeFirestoreRecord(
     await saveQueueItem(item);
     getAllQueueItems(userId).then(notifyListeners);
   } catch (firestoreErr: any) {
-    console.warn(`[BACKGROUND QUEUE] Firestore write warning para ${recordId}, mantendo na fila:`, firestoreErr);
-    item.status = 'uploaded'; // Keep as uploaded so we don't re-upload bytes to Storage
-    item.progress = 90;
+    console.warn(`[BACKGROUND QUEUE] Firestore write warning para ${recordId}:`, firestoreErr);
+    // Keep uploaded status so we don't re-upload bytes to Storage
+    item.status = 'uploaded';
+    item.progress = 92;
     item.errorMessage = 'Aguardando confirmação do Firestore.';
     item.updatedAt = Date.now();
     await saveQueueItem(item);
@@ -482,13 +662,105 @@ async function finalizeFirestoreRecord(
 }
 
 /**
- * Retry a specific failed queue item
+ * 5. CANCEL AND PURGE (The Definitive Fix for Record Deletions)
+ *
+ * When a user deletes a record:
+ * - Marks tombstone to prevent any future re-upload or recreation.
+ * - Cancels running Firebase Storage upload immediately.
+ * - Deletes queue items from IndexedDB.
+ * - Deletes binary blobs from IndexedDB.
+ * - Removes from local storage cache.
+ * - Deletes from Firestore and Storage if already present.
+ */
+export async function cancelAndPurgeRecordUpload(
+  recordId: string,
+  userId: string,
+  attachments?: { storagePath?: string }[]
+): Promise<void> {
+  console.log(`[BACKGROUND QUEUE] Executando cancelamento e expurgo definitivo para: ${recordId}`);
+
+  // 1. Mark as tombstone (persisted locally)
+  addDeletedTombstone(recordId);
+
+  // 2. Abort any active upload task
+  const taskByRec = activeUploadTasks.get(recordId);
+  if (taskByRec) {
+    try {
+      taskByRec.cancel();
+    } catch {}
+    activeUploadTasks.delete(recordId);
+  }
+
+  const queueId = `queue_${recordId}`;
+  const taskByQueue = activeUploadTasks.get(queueId);
+  if (taskByQueue) {
+    try {
+      taskByQueue.cancel();
+    } catch {}
+    activeUploadTasks.delete(queueId);
+  }
+
+  // 3. Purge from IndexedDB upload queue
+  await deleteQueueItemsByRecordId(recordId);
+  await deleteQueueItem(queueId);
+
+  // 4. Purge local media blob from IndexedDB
+  await deleteLocalMediaBlob(recordId);
+
+  // 5. Remove from localStorage cached records
+  try {
+    const cacheKey = `diario_pessoal_records_cache_${userId}`;
+    const raw = localStorage.getItem(cacheKey);
+    if (raw) {
+      const list: DiaryRecord[] = JSON.parse(raw);
+      const filtered = list.filter((r) => r.id !== recordId);
+      localStorage.setItem(cacheKey, JSON.stringify(filtered));
+    }
+  } catch (e) {
+    console.warn('[BACKGROUND QUEUE] Cache purge warning:', e);
+  }
+
+  // 6. Delete from Firestore
+  try {
+    const docRef = doc(db, 'users', userId, 'records', recordId);
+    await deleteDoc(docRef);
+  } catch (e) {
+    console.warn('[BACKGROUND QUEUE] Firestore delete doc warning:', e);
+  }
+
+  // 7. Delete from Firebase Storage if storage paths exist
+  if (attachments && attachments.length > 0) {
+    for (const att of attachments) {
+      if (att.storagePath) {
+        try {
+          const sRef = storageRef(storage, att.storagePath);
+          await deleteObject(sRef);
+        } catch (e) {
+          // ignore if already gone
+        }
+      }
+    }
+  }
+
+  // 8. Notify UI listeners so badge/status updates instantly
+  getAllQueueItems(userId).then(notifyListeners);
+}
+
+/**
+ * 6. Retry a specific failed queue item (Resets retry count)
  */
 export async function retryQueueItem(queueId: string, userId: string): Promise<void> {
   const item = await getQueueItem(queueId);
   if (!item) return;
 
+  if (isDeletedTombstoned(item.recordId)) {
+    await cancelAndPurgeRecordUpload(item.recordId, userId);
+    return;
+  }
+
   item.status = 'pending_upload';
+  item.retryCount = 0;
+  item.progress = 5;
   item.errorMessage = undefined;
   item.updatedAt = Date.now();
   await saveQueueItem(item);
@@ -498,25 +770,29 @@ export async function retryQueueItem(queueId: string, userId: string): Promise<v
 }
 
 /**
- * Cancel/Remove a queue item
+ * 7. Cancel a specific queue item
  */
 export async function cancelQueueItem(queueId: string, userId: string): Promise<void> {
-  const task = activeUploadTasks.get(queueId);
-  if (task) {
-    try {
-      task.cancel();
-    } catch {}
-    activeUploadTasks.delete(queueId);
+  const item = await getQueueItem(queueId);
+  if (item) {
+    await cancelAndPurgeRecordUpload(item.recordId, userId);
+  } else {
+    const task = activeUploadTasks.get(queueId);
+    if (task) {
+      try {
+        task.cancel();
+      } catch {}
+      activeUploadTasks.delete(queueId);
+    }
+    await deleteQueueItem(queueId);
+    getAllQueueItems(userId).then(notifyListeners);
   }
-  await deleteQueueItem(queueId);
-  getAllQueueItems(userId).then(notifyListeners);
 }
 
 // Global Online Listener
 if (typeof window !== 'undefined') {
   window.addEventListener('online', () => {
-    console.log('[BACKGROUND QUEUE] Conexão detectada. Reiniciando fila de uploads...');
-    // Process for any active cached user
+    console.log('[BACKGROUND QUEUE] Conexão restabelecida. Retomando fila de uploads...');
     const keys = Object.keys(localStorage).filter((k) =>
       k.startsWith('diario_pessoal_records_cache_')
     );

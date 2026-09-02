@@ -1,5 +1,7 @@
 import express from 'express';
 import path from 'path';
+import fs from 'fs';
+import fsp from 'fs/promises';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
@@ -7,6 +9,19 @@ import { createServer as createViteServer } from 'vite';
 dotenv.config();
 
 const PORT = 3000;
+
+// Directory for local persistent storage fallback
+const UPLOADS_DIR = path.join(process.cwd(), '.uploads');
+try {
+  if (!fs.existsSync(UPLOADS_DIR)) {
+    fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+  }
+} catch (e) {
+  console.warn('[SERVER] Warning creating uploads directory:', e);
+}
+
+// In-memory fallback map if disk write fails
+const memoryFiles = new Map<string, { fileName: string; mimeType: string; buffer: Buffer }>();
 
 function getGeminiClient(): GoogleGenAI | null {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -189,7 +204,7 @@ async function startServer() {
     });
   });
 
-  // API: Robust File Upload (Supports base64 data URLs & raw payloads for photos, audios, videos, PDFs)
+  // API: Robust File Upload (Supports base64 data & binary payloads with persistent serving)
   apiRouter.post('/upload', async (req, res) => {
     try {
       const { fileName, mimeType, dataBase64, userId, recordId } = req.body;
@@ -199,26 +214,120 @@ async function startServer() {
 
       const cleanFileName = (fileName || `arquivo_${Date.now()}`).replace(/[^a-zA-Z0-9._-]/g, '_');
       const safeMimeType = mimeType || 'application/octet-stream';
-      const fileId = `file_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+      const fileId = `file_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 
-      // Construct verified Data URL or served URL
-      const dataUrl = dataBase64.startsWith('data:')
-        ? dataBase64
-        : `data:${safeMimeType};base64,${dataBase64}`;
+      // Decode base64 payload
+      const pureBase64 = dataBase64.replace(/^data:[^;]+;base64,/, '');
+      const fileBuffer = Buffer.from(pureBase64, 'base64');
+      const fileSize = fileBuffer.length;
 
-      console.log(`[SERVER UPLOAD] Arquivo recebido: ${cleanFileName} (${safeMimeType}) para usuário ${userId || 'anon'}`);
+      // Persist to disk
+      let savedToDisk = false;
+      const targetFilePath = path.join(UPLOADS_DIR, `${fileId}_${cleanFileName}`);
+      const metaFilePath = path.join(UPLOADS_DIR, `${fileId}.meta.json`);
+
+      try {
+        await fsp.writeFile(targetFilePath, fileBuffer);
+        await fsp.writeFile(
+          metaFilePath,
+          JSON.stringify({
+            fileName: cleanFileName,
+            mimeType: safeMimeType,
+            fileSize,
+            userId,
+            recordId,
+            createdAt: new Date().toISOString(),
+          })
+        );
+        savedToDisk = true;
+      } catch (fsErr) {
+        console.warn('[SERVER UPLOAD] Disk save warning, falling back to memory cache:', fsErr);
+      }
+
+      // Always keep in memory cache for instantaneous response
+      memoryFiles.set(fileId, {
+        fileName: cleanFileName,
+        mimeType: safeMimeType,
+        buffer: fileBuffer,
+      });
+
+      const fileServingUrl = `/api/files/${fileId}`;
+      console.log(
+        `[SERVER UPLOAD] Arquivo salvo (${savedToDisk ? 'disco+memória' : 'memória'}): ${cleanFileName} (${safeMimeType}, ${fileSize} bytes) -> ${fileServingUrl}`
+      );
 
       res.json({
         success: true,
         fileId,
-        url: dataUrl,
+        url: fileServingUrl,
         fileName: cleanFileName,
+        fileSize,
         mimeType: safeMimeType,
         confirmedAt: new Date().toISOString(),
       });
     } catch (err: any) {
       console.error('[SERVER UPLOAD ERROR]', err);
       res.status(500).json({ error: err.message || 'Falha no upload do servidor.' });
+    }
+  });
+
+  // API: File Serving with Range Support for audio/video streaming & documents
+  apiRouter.get('/files/:fileId', async (req, res) => {
+    try {
+      const { fileId } = req.params;
+      if (!fileId || typeof fileId !== 'string') {
+        return res.status(400).send('ID de arquivo inválido.');
+      }
+
+      // Check memory cache first
+      const memFile = memoryFiles.get(fileId);
+      if (memFile) {
+        res.setHeader('Content-Type', memFile.mimeType);
+        res.setHeader('Content-Disposition', `inline; filename="${memFile.fileName}"`);
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        res.setHeader('Accept-Ranges', 'bytes');
+        return res.send(memFile.buffer);
+      }
+
+      // Check disk
+      const metaPath = path.join(UPLOADS_DIR, `${fileId}.meta.json`);
+      if (fs.existsSync(metaPath)) {
+        const metaRaw = await fsp.readFile(metaPath, 'utf-8');
+        const meta = JSON.parse(metaRaw);
+        const diskFilePath = path.join(UPLOADS_DIR, `${fileId}_${meta.fileName}`);
+
+        if (fs.existsSync(diskFilePath)) {
+          const stat = await fsp.stat(diskFilePath);
+          const range = req.headers.range;
+
+          res.setHeader('Content-Type', meta.mimeType || 'application/octet-stream');
+          res.setHeader('Content-Disposition', `inline; filename="${meta.fileName}"`);
+          res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+          res.setHeader('Accept-Ranges', 'bytes');
+
+          if (range) {
+            const parts = range.replace(/bytes=/, '').split('-');
+            const start = parseInt(parts[0], 10);
+            const end = parts[1] ? parseInt(parts[1], 10) : stat.size - 1;
+            const chunksize = end - start + 1;
+            const fileStream = fs.createReadStream(diskFilePath, { start, end });
+            res.writeHead(206, {
+              'Content-Range': `bytes ${start}-${end}/${stat.size}`,
+              'Content-Length': chunksize,
+            });
+            return fileStream.pipe(res);
+          } else {
+            res.setHeader('Content-Length', stat.size);
+            return fs.createReadStream(diskFilePath).pipe(res);
+          }
+        }
+      }
+
+      // If file not found
+      return res.status(404).send('Arquivo não encontrado no servidor.');
+    } catch (err: any) {
+      console.error('[SERVER FILE SERVE ERROR]', err);
+      res.status(500).send('Erro ao carregar arquivo.');
     }
   });
 

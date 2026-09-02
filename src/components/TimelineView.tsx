@@ -221,14 +221,31 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                         </p>
                       )}
 
-                      {photoAtt && (
-                        <div className="rounded-xl overflow-hidden bg-stone-100 aspect-video max-h-48 border border-stone-200/60">
+                      {(photoAtt?.url || (rec.type === 'photo' && (rec.downloadUrl || rec.thumbnailUrl))) && (
+                        <div className="rounded-xl overflow-hidden bg-stone-100 aspect-video max-h-48 border border-stone-200/60 flex items-center justify-center">
                           <img
-                            src={photoAtt.url}
+                            src={photoAtt?.url || rec.downloadUrl || rec.thumbnailUrl}
                             alt={rec.title || 'Foto'}
                             className="w-full h-full object-cover"
                             referrerPolicy="no-referrer"
                           />
+                        </div>
+                      )}
+
+                      {rec.type === 'video' && (rec.downloadUrl || rec.thumbnailUrl) && (
+                        <div className="rounded-xl overflow-hidden bg-stone-900 aspect-video max-h-48 border border-stone-200/60 relative flex items-center justify-center">
+                          {rec.thumbnailUrl ? (
+                            <img
+                              src={rec.thumbnailUrl}
+                              alt={rec.title || 'Vídeo'}
+                              className="w-full h-full object-cover opacity-80"
+                            />
+                          ) : (
+                            <video
+                              src={rec.downloadUrl}
+                              className="w-full h-full object-cover opacity-75"
+                            />
+                          )}
                         </div>
                       )}
 

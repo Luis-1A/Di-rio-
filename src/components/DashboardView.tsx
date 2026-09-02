@@ -16,6 +16,7 @@ import {
   FolderClosed,
   CheckCircle2,
   Calendar,
+  RotateCw,
 } from 'lucide-react';
 
 interface DashboardViewProps {
@@ -356,27 +357,47 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 )}
 
                 {/* Photo Preview */}
-                {(photoAttachment?.url || (record.type === 'photo' && record.downloadUrl)) && (
+                {(photoAttachment?.url || (record.type === 'photo' && (record.downloadUrl || record.thumbnailUrl))) && (
                   <div className="rounded-2xl overflow-hidden border border-stone-200/80 bg-stone-900/5 max-h-72 relative flex items-center justify-center p-1">
                     <img
-                      src={photoAttachment?.url || record.downloadUrl}
+                      src={photoAttachment?.url || record.downloadUrl || record.thumbnailUrl}
                       alt={record.title || 'Foto'}
                       className="max-w-full max-h-72 w-auto h-auto object-contain rounded-xl group-hover:scale-[1.01] transition-transform duration-300"
                       referrerPolicy="no-referrer"
                       loading="lazy"
                     />
+                    {record.uploadStatus === 'uploading' && (
+                      <span className="absolute bottom-2 right-2 px-2 py-0.5 rounded-md bg-stone-900/80 text-amber-300 text-[10px] font-medium flex items-center gap-1 backdrop-blur-xs shadow-xs">
+                        <RotateCw className="w-2.5 h-2.5 animate-spin" />
+                        Sincronizando
+                      </span>
+                    )}
                   </div>
                 )}
 
                 {/* Video Preview */}
-                {(videoAttachment?.url || (record.type === 'video' && record.downloadUrl)) && (
-                  <div className="rounded-2xl overflow-hidden border border-stone-200/80 bg-stone-900 aspect-video max-h-56 relative group/vid">
-                    <video
-                      src={videoAttachment?.url || record.downloadUrl}
-                      className="w-full h-full object-contain"
-                      controls
-                      preload="metadata"
-                    />
+                {(videoAttachment?.url || (record.type === 'video' && (record.downloadUrl || record.thumbnailUrl))) && (
+                  <div className="rounded-2xl overflow-hidden border border-stone-200/80 bg-stone-900 aspect-video max-h-56 relative group/vid flex items-center justify-center">
+                    {videoAttachment?.url || record.downloadUrl ? (
+                      <video
+                        src={videoAttachment?.url || record.downloadUrl}
+                        className="w-full h-full object-contain"
+                        controls
+                        preload="metadata"
+                      />
+                    ) : (
+                      <div className="relative w-full h-full flex items-center justify-center">
+                        <img
+                          src={record.thumbnailUrl}
+                          alt={record.title || 'Vídeo'}
+                          className="w-full h-full object-contain opacity-75"
+                        />
+                        <div className="absolute inset-0 bg-black/40 backdrop-blur-xs flex items-center justify-center gap-2 text-white">
+                          <RotateCw className="w-4 h-4 animate-spin text-amber-400" />
+                          <span className="text-xs font-medium">Sincronizando da nuvem...</span>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
 

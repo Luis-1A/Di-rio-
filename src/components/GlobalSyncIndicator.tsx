@@ -45,14 +45,25 @@ export const GlobalSyncIndicator: React.FC<GlobalSyncIndicatorProps> = ({ userId
     return null;
   }
 
-  const uploadingItems = queueItems.filter(
-    (i) => i.status === 'uploading' || i.status === 'pending_upload' || i.status === 'uploaded'
-  );
-  const failedItems = queueItems.filter((i) => i.status === 'upload_error');
-  const syncedItems = queueItems.filter((i) => i.status === 'synced');
+  const isUploading = (status: string) =>
+    status === 'uploading' ||
+    status === 'pending_upload' ||
+    status === 'pending' ||
+    status === 'uploaded';
 
-  // Currently uploading primary item
-  const activeItem = uploadingItems.find((i) => i.status === 'uploading') || uploadingItems[0];
+  const isFailed = (status: string) =>
+    status === 'upload_error' || status === 'failed';
+
+  const isSynced = (status: string) =>
+    status === 'synced' || status === 'completed';
+
+  const uploadingItems = queueItems.filter((i) => isUploading(i.status));
+  const failedItems = queueItems.filter((i) => isFailed(i.status));
+  const syncedItems = queueItems.filter((i) => isSynced(i.status));
+
+  // Active uploading item
+  const activeItem =
+    uploadingItems.find((i) => i.status === 'uploading') || uploadingItems[0];
   const overallPercent = activeItem?.progress || 0;
 
   const handleRetryAll = async () => {
@@ -88,7 +99,7 @@ export const GlobalSyncIndicator: React.FC<GlobalSyncIndicatorProps> = ({ userId
 
   return (
     <div className="fixed bottom-20 md:bottom-6 right-4 z-40 max-w-sm w-[calc(100vw-2rem)] md:w-80">
-      {/* Floating Pill Summary (Always visible when queue is not empty) */}
+      {/* Floating Pill Summary */}
       <div
         onClick={() => setIsOpen(!isOpen)}
         className="bg-stone-900/95 hover:bg-stone-900 text-stone-100 backdrop-blur-md px-3.5 py-2.5 rounded-2xl shadow-xl border border-stone-700/60 cursor-pointer flex items-center justify-between gap-3 transition-all select-none"
@@ -110,7 +121,7 @@ export const GlobalSyncIndicator: React.FC<GlobalSyncIndicatorProps> = ({ userId
               {uploadingItems.length > 0
                 ? `${uploadingItems.length} arquivo${uploadingItems.length > 1 ? 's' : ''} em segundo plano`
                 : failedItems.length > 0
-                ? `${failedItems.length} com erro de sincronização`
+                ? `${failedItems.length} pendente${failedItems.length > 1 ? 's' : ''} de envio`
                 : `${syncedItems.length} sincronizado${syncedItems.length > 1 ? 's' : ''} na nuvem`}
             </span>
             {uploadingItems.length > 0 && activeItem && (
@@ -126,7 +137,7 @@ export const GlobalSyncIndicator: React.FC<GlobalSyncIndicatorProps> = ({ userId
         </div>
       </div>
 
-      {/* Expanded Panel with Detailed Queue Items */}
+      {/* Expanded Panel */}
       {isOpen && (
         <div className="mt-2 bg-white rounded-2xl shadow-2xl border border-stone-200 overflow-hidden text-stone-800 animate-in fade-in slide-in-from-bottom-2 duration-200">
           {/* Header */}
@@ -140,16 +151,18 @@ export const GlobalSyncIndicator: React.FC<GlobalSyncIndicatorProps> = ({ userId
             <div className="flex items-center gap-1">
               {syncedItems.length > 0 && (
                 <button
+                  type="button"
                   onClick={handleClearSynced}
-                  className="text-[10px] text-stone-500 hover:text-stone-700 px-2 py-0.5 rounded hover:bg-stone-200/60"
+                  className="text-[10px] text-stone-500 hover:text-stone-700 px-2 py-0.5 rounded-sm hover:bg-stone-200/60 cursor-pointer"
                   title="Limpar concluídos da lista"
                 >
                   Limpar
                 </button>
               )}
               <button
+                type="button"
                 onClick={() => setIsOpen(false)}
-                className="p-1 text-stone-400 hover:text-stone-600 rounded-lg"
+                className="p-1 text-stone-400 hover:text-stone-600 rounded-lg cursor-pointer"
               >
                 <X className="w-3.5 h-3.5" />
               </button>
@@ -170,17 +183,17 @@ export const GlobalSyncIndicator: React.FC<GlobalSyncIndicatorProps> = ({ userId
                         {item.fileName || item.title}
                       </p>
                       <p className="text-[10px] text-stone-400">
-                        {(item.fileSize / (1024 * 1024)).toFixed(2)} MB
+                        {item.fileSize ? `${(item.fileSize / (1024 * 1024)).toFixed(2)} MB` : 'Texto/Metadados'}
                       </p>
                     </div>
                   </div>
 
                   {/* Status Badge & Actions */}
                   <div className="flex items-center gap-1.5 shrink-0">
-                    {item.status === 'synced' && (
+                    {isSynced(item.status) && (
                       <span className="inline-flex items-center gap-1 text-[10px] font-medium text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
                         <CheckCircle2 className="w-2.5 h-2.5" />
-                        <span>Nuvem</span>
+                        <span>Sincronizado</span>
                       </span>
                     )}
 
@@ -191,7 +204,7 @@ export const GlobalSyncIndicator: React.FC<GlobalSyncIndicatorProps> = ({ userId
                       </span>
                     )}
 
-                    {item.status === 'pending_upload' && (
+                    {(item.status === 'pending_upload' || item.status === 'pending') && (
                       <span className="inline-flex items-center gap-1 text-[10px] font-medium text-stone-600 bg-stone-100 px-2 py-0.5 rounded-full">
                         <Clock className="w-2.5 h-2.5" />
                         <span>Na fila</span>
@@ -205,21 +218,23 @@ export const GlobalSyncIndicator: React.FC<GlobalSyncIndicatorProps> = ({ userId
                       </span>
                     )}
 
-                    {item.status === 'upload_error' && (
+                    {isFailed(item.status) && (
                       <div className="flex items-center gap-1">
                         <button
+                          type="button"
                           onClick={() => retryQueueItem(item.id, userId)}
-                          className="p-1 text-red-600 hover:bg-red-50 rounded"
+                          className="p-1 text-red-600 hover:bg-red-50 rounded-sm cursor-pointer"
                           title="Tentar novamente"
                         >
-                          <RotateCw className="w-3 h-3" />
+                          <RotateCw className="w-3.5 h-3.5" />
                         </button>
                         <button
+                          type="button"
                           onClick={() => cancelQueueItem(item.id, userId)}
-                          className="p-1 text-stone-400 hover:text-stone-600 rounded"
+                          className="p-1 text-stone-400 hover:text-stone-600 rounded-sm cursor-pointer"
                           title="Remover da fila"
                         >
-                          <Trash2 className="w-3 h-3" />
+                          <Trash2 className="w-3.5 h-3.5" />
                         </button>
                       </div>
                     )}
@@ -236,9 +251,9 @@ export const GlobalSyncIndicator: React.FC<GlobalSyncIndicatorProps> = ({ userId
                   </div>
                 )}
 
-                {item.status === 'upload_error' && (
+                {isFailed(item.status) && (
                   <p className="text-[10px] text-red-600 truncate">
-                    {item.errorMessage || 'Falha ao sincronizar. Arquivo salvo localmente.'}
+                    {item.errorMessage || 'Não foi possível enviar este arquivo. Toque para tentar novamente.'}
                   </p>
                 )}
               </div>
@@ -252,9 +267,10 @@ export const GlobalSyncIndicator: React.FC<GlobalSyncIndicatorProps> = ({ userId
                 {failedItems.length} pendência(s)
               </span>
               <button
+                type="button"
                 onClick={handleRetryAll}
                 disabled={isRetryingAll}
-                className="text-[11px] font-medium bg-red-600 text-white px-2.5 py-1 rounded-lg hover:bg-red-700 transition flex items-center gap-1 disabled:opacity-50"
+                className="text-[11px] font-medium bg-red-600 text-white px-2.5 py-1 rounded-lg hover:bg-red-700 transition flex items-center gap-1 disabled:opacity-50 cursor-pointer"
               >
                 <RotateCw className={`w-3 h-3 ${isRetryingAll ? 'animate-spin' : ''}`} />
                 <span>Tentar Todos</span>

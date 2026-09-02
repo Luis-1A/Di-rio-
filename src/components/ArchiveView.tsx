@@ -329,10 +329,10 @@ export const ArchiveView: React.FC<ArchiveViewProps> = ({
                       {/* Left: Thumbnail & Details */}
                       <div className="flex items-center gap-3 min-w-0 flex-1">
                         {/* 1. Photo Thumbnail */}
-                        {(photoAtt?.url || (rec.type === 'photo' && rec.downloadUrl)) && (
+                        {(photoAtt?.url || (rec.type === 'photo' && (rec.downloadUrl || rec.thumbnailUrl))) && (
                           <div className="w-12 h-12 rounded-xl overflow-hidden bg-stone-100 border border-stone-200/60 shrink-0">
                             <img
-                              src={photoAtt?.url || rec.downloadUrl}
+                              src={photoAtt?.url || rec.downloadUrl || rec.thumbnailUrl}
                               alt={rec.title || 'Foto'}
                               className="w-full h-full object-cover"
                               referrerPolicy="no-referrer"
@@ -341,12 +341,20 @@ export const ArchiveView: React.FC<ArchiveViewProps> = ({
                         )}
 
                         {/* 2. Video Thumbnail */}
-                        {(videoAtt?.url || (rec.type === 'video' && rec.downloadUrl)) && !photoAtt && (
+                        {(videoAtt?.url || (rec.type === 'video' && (rec.downloadUrl || rec.thumbnailUrl))) && !photoAtt && (
                           <div className="w-12 h-12 rounded-xl overflow-hidden bg-stone-900 shrink-0 relative flex items-center justify-center">
-                            <video
-                              src={videoAtt?.url || rec.downloadUrl}
-                              className="w-full h-full object-cover opacity-75"
-                            />
+                            {rec.thumbnailUrl ? (
+                              <img
+                                src={rec.thumbnailUrl}
+                                alt={rec.title || 'Vídeo'}
+                                className="w-full h-full object-cover opacity-80"
+                              />
+                            ) : (
+                              <video
+                                src={videoAtt?.url || rec.downloadUrl}
+                                className="w-full h-full object-cover opacity-75"
+                              />
+                            )}
                             <div className="absolute inset-0 flex items-center justify-center">
                               <Play className="w-4 h-4 fill-white text-white ml-0.5" />
                             </div>

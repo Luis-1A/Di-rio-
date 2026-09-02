@@ -31,6 +31,8 @@ import {
   UserProfile,
 } from '../types';
 import { syncQueue, generateOperationId } from './syncQueue';
+import { deleteRecordAndMediaDirect, uploadToStorageDirect } from './uploadService';
+import { compactMetadata } from './mediaCompressor';
 
 /**
  * Deeply sanitizes an object before writing to Firestore by removing any `undefined` values.
@@ -236,7 +238,7 @@ export async function saveRecord(
   const now = new Date().toISOString();
   const opId = record.operationId || generateOperationId('rec');
 
-  const fullRecord: DiaryRecord = {
+  const fullRecord: DiaryRecord = compactMetadata({
     ...record,
     id: recordId,
     userId: uid,
@@ -247,7 +249,7 @@ export async function saveRecord(
     isDeleted: record.isDeleted || false,
     attachments: record.attachments || [],
     tags: record.tags || [],
-  };
+  });
 
   const docRef = doc(db, 'users', uid, 'records', recordId);
 
@@ -316,22 +318,13 @@ export async function permanentlyDeleteRecord(
   recordId: string,
   attachments?: { storagePath?: string }[]
 ): Promise<void> {
-  // Delete attached files in storage if paths exist
-  if (attachments && attachments.length > 0) {
-    for (const att of attachments) {
-      if (att.storagePath) {
-        try {
-          const sRef = storageRef(storage, att.storagePath);
-          await deleteObject(sRef);
-        } catch (e) {
-          console.warn('Storage deletion failed for attachment:', e);
-        }
-      }
-    }
-  }
-
-  const docRef = doc(db, 'users', uid, 'records', recordId);
-  await deleteDoc(docRef);
+  // Delete document and all associated binary media in Firebase Storage
+  await deleteRecordAndMediaDirect(
+    uid,
+    recordId,
+    attachments?.[0]?.storagePath,
+    attachments as any
+  );
 }
 
 /**
@@ -459,8 +452,6 @@ export async function saveMessage(
   }
 }
 
-import { uploadToStorageWithProgress } from './uploadService';
-
 /**
  * 5. Firebase Storage File Upload with Progress, Timeout and Diagnostic Logs
  */
@@ -472,7 +463,7 @@ export async function uploadFileToStorage(
   onProgress?: (percent: number, phase: string) => void
 ): Promise<{ url: string; storagePath: string }> {
   const recordId = `rec_${Date.now()}`;
-  const res = await uploadToStorageWithProgress({
+  const res = await uploadToStorageDirect({
     uid,
     recordId,
     fileOrBlob,

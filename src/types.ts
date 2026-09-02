@@ -38,6 +38,7 @@ export interface RecordAttachment {
   type: 'image' | 'video' | 'audio' | 'document';
   url: string; // Storage download URL or data URL
   storagePath?: string;
+  thumbnailUrl?: string;
   size: number;
   mimeType: string;
   durationSeconds?: number;
@@ -59,17 +60,18 @@ export interface DiaryRecord {
   attachments: RecordAttachment[];
   storagePath?: string;
   downloadUrl?: string;
+  thumbnailUrl?: string;
   mimeType?: string;
   fileName?: string;
   fileSize?: number;
-  uploadStatus?: 'completed' | 'pending' | 'failed';
+  uploadStatus?: 'completed' | 'pending' | 'uploading' | 'failed';
   isFavorite: boolean;
   isDeleted: boolean;
   deletedAt?: string;
   createdAt: string;
   updatedAt: string;
   operationId: string;
-  syncStatus: 'synced' | 'pending' | 'failed';
+  syncStatus: 'synced' | 'pending' | 'uploading' | 'failed' | 'local';
 }
 
 export interface MemoryItem {
@@ -148,10 +150,15 @@ export interface SyncQueueItem {
 }
 
 export type UploadQueueStatus =
-  | 'pending_upload'
+  | 'pending'
   | 'uploading'
-  | 'uploaded'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'deleted'
   | 'synced'
+  | 'pending_upload'
+  | 'uploaded'
   | 'upload_error';
 
 export interface BackgroundUploadItem {
@@ -173,6 +180,7 @@ export interface BackgroundUploadItem {
   progress: number; // 0 to 100
   storagePath?: string;
   downloadUrl?: string;
+  thumbnailUrl?: string;
   errorMessage?: string;
   retryCount: number;
   audioDurationSeconds?: number;

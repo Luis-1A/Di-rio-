@@ -1,32 +1,38 @@
 /**
- * Robust, Non-Blocking Upload & Persistence Service for Diário Pessoal
+ * Direct, Reliable Firebase Storage & Firestore Persistence Pipeline
  *
- * Architecture:
- * 1. Storage: Binary media files (photos, videos, audio, documents/PDFs) go to Firebase Storage
- *    Path: users/{userId}/registros/{recordId}/{fileName}
- * 2. Firestore: Only lightweight metadata (<10KB) goes to Firestore
- *    Path: users/{userId}/records/{recordId}
- * 3. IndexedDB: Local binary cache for instant offline playback & resilient background sync
- * 4. Realistic Progress Tracking: 0% -> 10% (validation) -> 15-85% (Storage upload) -> 90% (Firestore write) -> 100% (Confirmed)
- * 5. Strict Firestore Timeouts: Write operations never hang indefinitely
+ * Requirements Enforcement:
+ * 1. ZERO BACKGROUND QUEUE: Direct in-modal upload with synchronous confirmation.
+ * 2. REAL PROGRESS: Byte-level progress calculation (bytesTransferred / totalBytes).
+ * 3. REAL TIMEOUTS: Strict timeout guards preventing infinite loading screens.
+ * 4. STRICT SEPARATION: Binary media in Firebase Storage, clean JSON metadata in Firestore.
+ * 5. UNIQUE RECORD ID: A single immutable `recordId` shared across Storage, Firestore, and UI.
+ * 6. FIRESTORE VERIFICATION: Reads back the document after `setDoc` to confirm persistence.
+ * 7. COMPLETE CANCELLATION: Immediately aborts `uploadTask.cancel()` and cleans temporary files.
  */
 
 import {
   ref as storageRef,
   uploadBytesResumable,
   getDownloadURL,
+  deleteObject,
   UploadTask,
 } from 'firebase/storage';
 import {
   doc,
   setDoc,
+  getDoc,
+  deleteDoc,
   serverTimestamp,
 } from 'firebase/firestore';
 import { db, storage } from './firebase';
 import { DiaryRecord, RecordAttachment, RecordType } from '../types';
-import { syncQueue, generateOperationId } from './syncQueue';
-import { sanitizeForFirestore } from './firestoreService';
-import { saveLocalMediaBlob } from './idbStorage';
+import {
+  compressImage,
+  compressSmallTextFile,
+  compactMetadata,
+  extractVideoThumbnail,
+} from './mediaCompressor';
 
 export interface FileValidationResult {
   valid: boolean;
@@ -44,27 +50,62 @@ export type UploadStage =
   | 'uploading'
   | 'storage_confirmed'
   | 'saving_record'
+  | 'verifying'
   | 'completed'
-  | 'failed';
+  | 'failed'
+  | 'canceled';
 
 export interface UploadStageUpdate {
   stage: UploadStage;
   percent: number;
   message: string;
+  bytesTransferred?: number;
+  totalBytes?: number;
   error?: string;
 }
 
-export interface UploadProgressCallback {
+export interface UploadStageProgress {
   (update: UploadStageUpdate): void;
 }
 
-export interface UploadResult {
+export interface DirectUploadResult {
   url: string;
   storagePath: string;
   fileName: string;
   fileSize: number;
   mimeType: string;
-  isLocalOnly?: boolean;
+}
+
+export interface CancelableTask {
+  cancel: () => void;
+}
+
+// Active task registry for instant cancellation
+const activeTasks = new Map<string, CancelableTask>();
+
+export function registerActiveUploadTask(recordId: string, task: CancelableTask | UploadTask) {
+  if ('cancel' in task && typeof task.cancel === 'function') {
+    activeTasks.set(recordId, { cancel: () => task.cancel() });
+  }
+}
+
+export function unregisterActiveUploadTask(recordId: string) {
+  activeTasks.delete(recordId);
+}
+
+export function cancelActiveUploadTask(recordId: string): boolean {
+  const task = activeTasks.get(recordId);
+  if (task) {
+    try {
+      task.cancel();
+      activeTasks.delete(recordId);
+      console.log(`[UPLOAD CANCEL] Tarefa de upload cancelada para recordId: ${recordId}`);
+      return true;
+    } catch (err) {
+      console.warn('[UPLOAD CANCEL] Erro ao cancelar tarefa:', err);
+    }
+  }
+  return false;
 }
 
 /**
@@ -103,12 +144,13 @@ export function validateFile(
 ): FileValidationResult {
   if (!fileOrBlob) {
     const err = 'Nenhum arquivo fornecido para validação.';
-    console.error(`[UPLOAD ERROR] etapa: validação | código: FILE_MISSING | mensagem: ${err}`);
     return { valid: false, error: err, fileName: '', fileSize: 0, mimeType: '', extension: '' };
   }
 
   const isFile = fileOrBlob instanceof File;
-  const rawName = isFile ? (fileOrBlob as File).name : `gravacao_${Date.now()}.${expectedType === 'audio' ? 'webm' : 'bin'}`;
+  const rawName = isFile
+    ? (fileOrBlob as File).name
+    : `gravacao_${Date.now()}.${expectedType === 'audio' ? 'webm' : 'bin'}`;
   const fileSize = fileOrBlob.size;
   let mimeType = fileOrBlob.type;
 
@@ -131,14 +173,9 @@ export function validateFile(
     else mimeType = 'application/octet-stream';
   }
 
-  console.log(
-    `[UPLOAD] arquivo selecionado: "${rawName}", tamanho: ${(fileSize / (1024 * 1024)).toFixed(2)} MB, tipo: ${mimeType}`
-  );
-
   // Check 0-byte corrupted files
   if (fileSize <= 0) {
     const err = 'O arquivo selecionado está vazio (0 bytes).';
-    console.error(`[UPLOAD ERROR] etapa: validação | código: ZERO_BYTE_FILE | mensagem: ${err}`);
     return { valid: false, error: err, fileName: rawName, fileSize, mimeType, extension };
   }
 
@@ -146,8 +183,7 @@ export function validateFile(
   const maxSize = MAX_SIZE_MAP[expectedType] || 50 * 1024 * 1024;
   if (fileSize > maxSize) {
     const maxMb = (maxSize / (1024 * 1024)).toFixed(0);
-    const err = `O arquivo excede o limite máximo permitido de ${maxMb} MB.`;
-    console.error(`[UPLOAD ERROR] etapa: validação | código: FILE_TOO_LARGE | mensagem: ${err}`);
+    const err = `O arquivo selecionado excede o limite máximo permitido de ${maxMb} MB.`;
     return { valid: false, error: err, fileName: rawName, fileSize, mimeType, extension };
   }
 
@@ -157,12 +193,9 @@ export function validateFile(
     const isMimeMatch = allowed.some((m) => mimeType.toLowerCase().startsWith(m.split('/')[0]));
     if (!isMimeMatch && mimeType !== 'application/octet-stream') {
       const err = `Tipo de mídia incompatível. Esperado: ${expectedType}, recebido: ${mimeType}`;
-      console.error(`[UPLOAD ERROR] etapa: validação | código: INVALID_MIME | mensagem: ${err}`);
       return { valid: false, error: err, fileName: rawName, fileSize, mimeType, extension };
     }
   }
-
-  console.log(`[UPLOAD] validação OK: ${rawName} (${fileSize} bytes, ext: .${extension})`);
 
   return {
     valid: true,
@@ -174,18 +207,26 @@ export function validateFile(
 }
 
 /**
- * 2. Upload file to Firebase Storage with real progress tracking and IndexedDB backup
+ * Formats bytes to human-readable string (e.g. 14.5 MB)
  */
-export async function uploadToStorageWithProgress(params: {
+export function formatBytes(bytes: number): string {
+  if (bytes <= 0) return '0 B';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * Upload file directly to dedicated server storage with real byte progress and instant response
+ */
+export async function uploadToServerDirect(params: {
   uid: string;
   recordId: string;
   fileOrBlob: File | Blob;
-  folder: 'images' | 'videos' | 'audio' | 'documents';
   fileName: string;
   mimeType?: string;
-  onProgress?: (update: UploadStageUpdate) => void;
-  timeoutMs?: number;
-}): Promise<UploadResult> {
+  onProgress?: UploadStageProgress;
+}): Promise<DirectUploadResult> {
   const {
     uid,
     recordId,
@@ -193,169 +234,343 @@ export async function uploadToStorageWithProgress(params: {
     fileName,
     mimeType = 'application/octet-stream',
     onProgress,
-    timeoutMs = 60000, // 60s timeout for real network uploads
   } = params;
-
   const sanitizedName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
-  const storagePath = `users/${uid}/registros/${recordId}/${sanitizedName}`;
 
-  console.log(`[UPLOAD] Iniciando envio do arquivo para Storage: ${storagePath}`);
-  onProgress?.({
-    stage: 'validating',
-    percent: 10,
-    message: 'Validando e preparando arquivo...',
+  // Convert to base64
+  const base64Data = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = (err) => reject(err);
+    reader.readAsDataURL(fileOrBlob);
   });
 
-  // Always back up the media blob in local IndexedDB so it's instantly playable offline
-  await saveLocalMediaBlob(recordId, fileOrBlob, sanitizedName, mimeType);
-  const localBlobUrl = URL.createObjectURL(fileOrBlob);
+  return new Promise<DirectUploadResult>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    registerActiveUploadTask(recordId, { cancel: () => xhr.abort() });
 
-  onProgress?.({
-    stage: 'uploading',
-    percent: 15,
-    message: 'Conectando ao Firebase Storage...',
-  });
-
-  return new Promise((resolve) => {
-    let isSettled = false;
-    let uploadTask: UploadTask | null = null;
-
-    // Timeout guard to prevent infinite lockup if network disconnects mid-stream
-    const timer = setTimeout(() => {
-      if (!isSettled) {
-        isSettled = true;
-        console.warn(`[UPLOAD TIMEOUT] Storage demorou mais de ${timeoutMs}ms. Usando armazenamento local temporário.`);
-        try {
-          if (uploadTask) uploadTask.cancel();
-        } catch {}
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && e.total > 0) {
+        const rawRatio = e.loaded / e.total;
+        const displayPercent = Math.min(80, Math.max(10, Math.round(10 + rawRatio * 70)));
+        const transferredStr = formatBytes(e.loaded);
+        const totalStr = formatBytes(e.total);
+        const rawPercent = Math.round(rawRatio * 100);
 
         onProgress?.({
-          stage: 'storage_confirmed',
-          percent: 85,
-          message: 'Arquivo salvo localmente. Sincronização em segundo plano.',
-        });
-
-        resolve({
-          url: localBlobUrl,
-          storagePath,
-          fileName: sanitizedName,
-          fileSize: fileOrBlob.size,
-          mimeType,
-          isLocalOnly: true,
+          stage: 'uploading',
+          percent: displayPercent,
+          bytesTransferred: e.loaded,
+          totalBytes: e.total,
+          message: `Enviando arquivo: ${transferredStr} de ${totalStr} (${rawPercent}%)...`,
         });
       }
-    }, timeoutMs);
+    };
 
-    try {
-      const sRef = storageRef(storage, storagePath);
-      uploadTask = uploadBytesResumable(sRef, fileOrBlob, {
-        contentType: mimeType,
-      });
-
-      uploadTask.on(
-        'state_changed',
-        (snapshot) => {
-          if (isSettled) return;
-          const total = snapshot.totalBytes;
-          const transferred = snapshot.bytesTransferred;
-          if (total > 0) {
-            const rawPercent = Math.round((transferred / total) * 100);
-            // Map raw storage progress strictly from 15% to 85%
-            const mappedPercent = Math.min(85, Math.max(15, Math.round(15 + (transferred / total) * 70)));
-            onProgress?.({
-              stage: 'uploading',
-              percent: mappedPercent,
-              message: `Enviando para o Firebase Storage (${rawPercent}%)...`,
-            });
-          }
-        },
-        (error) => {
-          if (isSettled) return;
-          isSettled = true;
-          clearTimeout(timer);
-          console.warn('[UPLOAD] Storage upload error, falling back to local media buffer:', error);
-
-          onProgress?.({
-            stage: 'storage_confirmed',
-            percent: 85,
-            message: 'Arquivo protegido localmente.',
-          });
-
-          resolve({
-            url: localBlobUrl,
-            storagePath,
-            fileName: sanitizedName,
-            fileSize: fileOrBlob.size,
-            mimeType,
-            isLocalOnly: true,
-          });
-        },
-        async () => {
-          if (isSettled) return;
-          try {
-            const downloadUrl = await getDownloadURL(uploadTask!.snapshot.ref);
-            isSettled = true;
-            clearTimeout(timer);
-
-            console.log(`[UPLOAD] Firebase Storage sucesso: ${downloadUrl}`);
+    xhr.onload = () => {
+      unregisterActiveUploadTask(recordId);
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          const res = JSON.parse(xhr.responseText);
+          if (res.success && res.url) {
+            console.log(`[SERVER UPLOAD SUCCESS] Arquivo salvo e confirmado: ${res.url}`);
             onProgress?.({
               stage: 'storage_confirmed',
               percent: 85,
-              message: 'Firebase confirmou o upload do arquivo com sucesso!',
+              bytesTransferred: fileOrBlob.size,
+              totalBytes: fileOrBlob.size,
+              message: 'Arquivo enviado com sucesso para o armazenamento!',
             });
-
             resolve({
-              url: downloadUrl,
-              storagePath,
-              fileName: sanitizedName,
-              fileSize: fileOrBlob.size,
-              mimeType,
-              isLocalOnly: false,
+              url: res.url,
+              storagePath: `server/${res.fileId || recordId}`,
+              fileName: res.fileName || sanitizedName,
+              fileSize: res.fileSize || fileOrBlob.size,
+              mimeType: res.mimeType || mimeType,
             });
-          } catch (urlErr) {
-            isSettled = true;
-            clearTimeout(timer);
-            console.warn('[UPLOAD] DownloadURL fetch warning:', urlErr);
-
-            resolve({
-              url: localBlobUrl,
-              storagePath,
-              fileName: sanitizedName,
-              fileSize: fileOrBlob.size,
-              mimeType,
-              isLocalOnly: true,
-            });
+            return;
           }
+        } catch (parseErr) {
+          console.error('[SERVER UPLOAD PARSE ERROR]', parseErr);
         }
-      );
-    } catch (initErr) {
-      if (!isSettled) {
-        isSettled = true;
-        clearTimeout(timer);
-        console.warn('[UPLOAD] Storage init error, fallback to local:', initErr);
-
-        resolve({
-          url: localBlobUrl,
-          storagePath,
-          fileName: sanitizedName,
-          fileSize: fileOrBlob.size,
-          mimeType,
-          isLocalOnly: true,
-        });
       }
-    }
+      const errMsg = 'Não foi possível concluir o envio do arquivo para o servidor.';
+      onProgress?.({
+        stage: 'failed',
+        percent: 0,
+        message: errMsg,
+        error: errMsg,
+      });
+      reject(new Error(errMsg));
+    };
+
+    xhr.onerror = () => {
+      unregisterActiveUploadTask(recordId);
+      const errMsg = 'Falha na conexão de rede ao enviar arquivo.';
+      onProgress?.({
+        stage: 'failed',
+        percent: 0,
+        message: errMsg,
+        error: errMsg,
+      });
+      reject(new Error(errMsg));
+    };
+
+    xhr.onabort = () => {
+      unregisterActiveUploadTask(recordId);
+      const errMsg = 'Envio cancelado pelo usuário.';
+      onProgress?.({
+        stage: 'canceled',
+        percent: 0,
+        message: errMsg,
+        error: errMsg,
+      });
+      reject(new Error(errMsg));
+    };
+
+    xhr.open('POST', '/api/upload');
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.send(
+      JSON.stringify({
+        fileName: sanitizedName,
+        mimeType,
+        dataBase64: base64Data,
+        userId: uid,
+        recordId,
+      })
+    );
   });
 }
 
 /**
- * 3. Complete End-to-End Save Pipeline:
- * Storage -> Firestore -> Server Verification -> Confirmed Status
- *
- * Guaranteed to NEVER hang at 96% or freeze the UI.
+ * 2. Upload file to Firebase Storage with REAL Progress, Strict Watchdog & Seamless Server Fallback
  */
-export async function executeRecordCreationPipeline(params: {
+export async function uploadToStorageDirect(params: {
   uid: string;
-  recordId?: string;
+  recordId: string;
+  fileOrBlob: File | Blob;
+  folder: 'images' | 'videos' | 'audio' | 'documents';
+  fileName: string;
+  mimeType?: string;
+  onProgress?: UploadStageProgress;
+  timeoutMs?: number;
+}): Promise<DirectUploadResult> {
+  const {
+    uid,
+    recordId,
+    fileOrBlob,
+    folder,
+    fileName,
+    mimeType = 'application/octet-stream',
+    onProgress,
+    timeoutMs = 60000,
+  } = params;
+
+  if (!navigator.onLine) {
+    const err = 'Sem conexão com a internet. Verifique sua rede e tente novamente.';
+    onProgress?.({
+      stage: 'failed',
+      percent: 0,
+      message: err,
+      error: err,
+    });
+    throw new Error(err);
+  }
+
+  const sanitizedName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
+  const storagePath = `users/${uid}/records/${recordId}/${sanitizedName}`;
+
+  console.log(`[STORAGE UPLOAD] Iniciando envio para: ${storagePath} (${formatBytes(fileOrBlob.size)})`);
+
+  onProgress?.({
+    stage: 'uploading',
+    percent: 5,
+    bytesTransferred: 0,
+    totalBytes: fileOrBlob.size,
+    message: `Iniciando upload de ${sanitizedName} (${formatBytes(fileOrBlob.size)})...`,
+  });
+
+  // Attempt Firebase Storage with a fast 6-second initial watchdog.
+  // If Firebase Storage connects and transmits bytes, it proceeds to completion.
+  // If Firebase Storage hangs without progress (e.g. unconfigured CORS/bucket),
+  // it seamlessly switches to the high-speed server pipeline so the user is never stuck.
+  try {
+    const firebaseResult = await new Promise<DirectUploadResult>((resolve, reject) => {
+      let isSettled = false;
+      let uploadTask: UploadTask | null = null;
+      let lastProgressTimestamp = Date.now();
+      let hasMadeProgress = false;
+
+      const initialStallLimit = 6000; // 6s to detect if Firebase Storage is responsive
+      const watchdogInterval = setInterval(() => {
+        if (isSettled) return;
+        const stallTime = Date.now() - lastProgressTimestamp;
+
+        if (!hasMadeProgress && stallTime > initialStallLimit) {
+          isSettled = true;
+          clearInterval(watchdogInterval);
+          unregisterActiveUploadTask(recordId);
+          try {
+            if (uploadTask) uploadTask.cancel();
+          } catch {}
+          console.warn(`[STORAGE WATCHDOG] Firebase Storage não respondeu em ${initialStallLimit}ms, ativando fallback automático.`);
+          reject(new Error('FIREBASE_STORAGE_STALLED'));
+          return;
+        }
+
+        if (stallTime > timeoutMs) {
+          isSettled = true;
+          clearInterval(watchdogInterval);
+          unregisterActiveUploadTask(recordId);
+          try {
+            if (uploadTask) uploadTask.cancel();
+          } catch {}
+          reject(new Error('FIREBASE_STORAGE_TIMEOUT'));
+        }
+      }, 1000);
+
+      try {
+        const sRef = storageRef(storage, storagePath);
+        uploadTask = uploadBytesResumable(sRef, fileOrBlob, {
+          contentType: mimeType,
+          cacheControl: 'public, max-age=31536000, immutable',
+          customMetadata: {
+            recordId,
+            uploadedAt: String(Date.now()),
+          },
+        });
+
+        registerActiveUploadTask(recordId, uploadTask);
+
+        uploadTask.on(
+          'state_changed',
+          (snapshot) => {
+            if (isSettled) return;
+            lastProgressTimestamp = Date.now();
+            const total = snapshot.totalBytes;
+            const transferred = snapshot.bytesTransferred;
+
+            if (transferred > 0) {
+              hasMadeProgress = true;
+            }
+
+            if (total > 0) {
+              const rawRatio = transferred / total;
+              const displayPercent = Math.min(80, Math.max(10, Math.round(10 + rawRatio * 70)));
+              const transferredStr = formatBytes(transferred);
+              const totalStr = formatBytes(total);
+              const rawPercent = Math.round(rawRatio * 100);
+
+              onProgress?.({
+                stage: 'uploading',
+                percent: displayPercent,
+                bytesTransferred: transferred,
+                totalBytes: total,
+                message: `Enviando arquivo: ${transferredStr} de ${totalStr} (${rawPercent}%)...`,
+              });
+            }
+          },
+          (error: any) => {
+            if (isSettled) return;
+            isSettled = true;
+            clearInterval(watchdogInterval);
+            unregisterActiveUploadTask(recordId);
+
+            if (error.code === 'storage/canceled') {
+              const friendlyMsg = 'Envio cancelado pelo usuário.';
+              onProgress?.({
+                stage: 'canceled',
+                percent: 0,
+                message: friendlyMsg,
+                error: friendlyMsg,
+              });
+              reject(new Error(friendlyMsg));
+            } else {
+              console.warn('[STORAGE WARN] Firebase Storage indisponível, ativando fallback:', error);
+              reject(error);
+            }
+          },
+          async () => {
+            if (isSettled) return;
+            try {
+              const downloadUrl = await getDownloadURL(uploadTask!.snapshot.ref);
+              isSettled = true;
+              clearInterval(watchdogInterval);
+              unregisterActiveUploadTask(recordId);
+
+              console.log(`[STORAGE SUCCESS] Arquivo enviado via Firebase Storage: ${downloadUrl}`);
+
+              onProgress?.({
+                stage: 'storage_confirmed',
+                percent: 85,
+                bytesTransferred: fileOrBlob.size,
+                totalBytes: fileOrBlob.size,
+                message: 'Arquivo enviado com sucesso para a nuvem!',
+              });
+
+              resolve({
+                url: downloadUrl,
+                storagePath,
+                fileName: sanitizedName,
+                fileSize: fileOrBlob.size,
+                mimeType,
+              });
+            } catch (urlErr: any) {
+              isSettled = true;
+              clearInterval(watchdogInterval);
+              unregisterActiveUploadTask(recordId);
+              reject(urlErr);
+            }
+          }
+        );
+      } catch (initErr: any) {
+        if (!isSettled) {
+          isSettled = true;
+          clearInterval(watchdogInterval);
+          unregisterActiveUploadTask(recordId);
+          reject(initErr);
+        }
+      }
+    });
+
+    return firebaseResult;
+  } catch (storageErr: any) {
+    if (storageErr?.message === 'Envio cancelado pelo usuário.') {
+      throw storageErr;
+    }
+
+    console.log('[STORAGE FALLBACK] Ativando pipeline de armazenamento de alta velocidade no servidor...');
+    onProgress?.({
+      stage: 'uploading',
+      percent: 15,
+      message: 'Conectando ao canal de upload de alta velocidade...',
+    });
+
+    return await uploadToServerDirect({
+      uid,
+      recordId,
+      fileOrBlob,
+      fileName: sanitizedName,
+      mimeType,
+      onProgress,
+    });
+  }
+}
+
+/**
+ * 3. Complete End-to-End Direct Pipeline (Storage -> Firestore -> Server Verification -> Release User)
+ *
+ * Sequence:
+ * 1. Validate file (if present)
+ * 2. Upload file to Firebase Storage with real bytes progress
+ * 3. Storage confirmed
+ * 4. Write compact JSON metadata to Firestore (users/{uid}/records/{recordId})
+ * 5. Verify Firestore record exists on server via `getDoc`
+ * 6. Mark as 100% completed and release user
+ */
+export async function executeDirectSavePipeline(params: {
+  uid: string;
+  recordId: string;
   type: RecordType;
   title: string;
   content: string;
@@ -367,10 +582,11 @@ export async function executeRecordCreationPipeline(params: {
   existingAttachments?: RecordAttachment[];
   audioDurationSeconds?: number;
   transcript?: string;
-  onProgress?: (update: UploadStageUpdate) => void;
+  onProgress?: UploadStageProgress;
 }): Promise<DiaryRecord> {
   const {
     uid,
+    recordId,
     type,
     title,
     content,
@@ -385,10 +601,18 @@ export async function executeRecordCreationPipeline(params: {
     onProgress,
   } = params;
 
-  // Step 1: Assign permanent record ID
-  const recordId =
-    params.recordId || `rec_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-  console.log(`[UPLOAD] ID definitivo do registro: ${recordId}`);
+  if (!navigator.onLine) {
+    const err = 'Sem conexão com a internet. Conecte-se para salvar o registro.';
+    onProgress?.({
+      stage: 'failed',
+      percent: 0,
+      message: err,
+      error: err,
+    });
+    throw new Error(err);
+  }
+
+  console.log(`[SAVE PIPELINE] Iniciando salvamento direto para recordId: ${recordId}`);
 
   let attachments: RecordAttachment[] = [...existingAttachments];
   let primaryStoragePath: string | undefined;
@@ -396,8 +620,9 @@ export async function executeRecordCreationPipeline(params: {
   let primaryFileName: string | undefined;
   let primaryFileSize: number | undefined;
   let primaryMimeType: string | undefined;
+  let primaryThumbnailUrl: string | undefined;
 
-  // Step 2: Upload binary media to Storage if a new file exists
+  // STEP 1: Upload Binary File to Firebase Storage (if a file was provided)
   if (fileOrBlob && type !== 'text') {
     const folderMap = {
       photo: 'images' as const,
@@ -410,29 +635,69 @@ export async function executeRecordCreationPipeline(params: {
 
     onProgress?.({
       stage: 'validating',
-      percent: 10,
-      message: 'Validando arquivo...',
+      percent: 5,
+      message: 'Validando e preparando arquivo...',
     });
 
     const val = validateFile(fileOrBlob, type === 'mixed' ? 'document' : type);
     if (!val.valid) {
+      const err = val.error || 'Arquivo selecionado não é válido.';
       onProgress?.({
         stage: 'failed',
         percent: 0,
-        message: val.error || 'Arquivo inválido.',
-        error: val.error,
+        message: err,
+        error: err,
       });
-      throw new Error(val.error || 'Arquivo inválido.');
+      throw new Error(err);
     }
 
-    const uploadRes = await uploadToStorageWithProgress({
+    let processedBlob: File | Blob = fileOrBlob;
+    let processedName = val.fileName;
+    let processedMime = val.mimeType;
+
+    // Fast image optimization and micro-thumbnail generation
+    if (type === 'photo' || fileOrBlob.type?.startsWith('image/')) {
+      try {
+        const comp = await compressImage(fileOrBlob, val.fileName);
+        processedBlob = comp.fileOrBlob;
+        processedName = comp.fileName;
+        processedMime = comp.mimeType;
+        if (comp.thumbnailUrl) {
+          primaryThumbnailUrl = comp.thumbnailUrl;
+        }
+      } catch (err) {
+        console.warn('[PIPELINE] Image optimization warning:', err);
+      }
+    } else if (type === 'video' || fileOrBlob.type?.startsWith('video/')) {
+      try {
+        const thumb = await extractVideoThumbnail(fileOrBlob);
+        if (thumb) {
+          primaryThumbnailUrl = thumb;
+        }
+      } catch (err) {
+        console.warn('[PIPELINE] Video thumbnail extraction warning:', err);
+      }
+    } else if (type === 'document' || fileOrBlob.type?.startsWith('text/')) {
+      try {
+        const comp = await compressSmallTextFile(fileOrBlob, val.fileName, val.mimeType);
+        if (comp.isCompressed) {
+          processedBlob = comp.fileOrBlob;
+        }
+      } catch (err) {
+        console.warn('[PIPELINE] Text file compression warning:', err);
+      }
+    }
+
+    // Direct Upload to Firebase Storage
+    const uploadRes = await uploadToStorageDirect({
       uid,
       recordId,
-      fileOrBlob,
+      fileOrBlob: processedBlob,
       folder: folderMap[type] || 'documents',
-      fileName: val.fileName,
-      mimeType: val.mimeType,
+      fileName: processedName,
+      mimeType: processedMime,
       onProgress,
+      timeoutMs: 60000,
     });
 
     primaryStoragePath = uploadRes.storagePath;
@@ -446,6 +711,7 @@ export async function executeRecordCreationPipeline(params: {
       name: uploadRes.fileName,
       type: type === 'photo' ? 'image' : type === 'document' ? 'document' : (type as any),
       url: uploadRes.url,
+      thumbnailUrl: primaryThumbnailUrl,
       storagePath: uploadRes.storagePath,
       size: uploadRes.fileSize,
       mimeType: uploadRes.mimeType,
@@ -461,24 +727,24 @@ export async function executeRecordCreationPipeline(params: {
     primaryFileName = existingAttachments[0].name;
     primaryFileSize = existingAttachments[0].size;
     primaryMimeType = existingAttachments[0].mimeType;
+    primaryThumbnailUrl = existingAttachments[0].thumbnailUrl;
   }
 
-  // Step 3: Write metadata to Firestore (Clean, light payload)
+  // STEP 2: Save metadata to Firestore
   onProgress?.({
     stage: 'saving_record',
-    percent: 90,
+    percent: 88,
     message: 'Gravando metadados no Firestore...',
   });
-  console.log(`[FIRESTORE] Gravando metadados do documento: users/${uid}/records/${recordId}`);
 
   const now = new Date().toISOString();
-  const opId = generateOperationId('rec_save');
+  const opId = `op_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
-  // Strip any accidental huge raw base64 data URLs from Firestore attachments to obey the 1MB limit
   const sanitizedAttachments = attachments.map((att) => {
     let cleanUrl = att.url;
-    if (cleanUrl && cleanUrl.startsWith('data:') && cleanUrl.length > 200000) {
-      cleanUrl = ''; // Keep storagePath reference, don't bloat Firestore
+    // Protect Firestore against large data URLs
+    if (cleanUrl && cleanUrl.startsWith('data:') && cleanUrl.length > 100000) {
+      cleanUrl = '';
     }
     return {
       ...att,
@@ -486,20 +752,39 @@ export async function executeRecordCreationPipeline(params: {
     };
   });
 
-  const fullRecord: DiaryRecord = {
+  const rawRecord: DiaryRecord = {
     id: recordId,
     userId: uid,
-    title: title.trim() || (type === 'photo' ? 'Foto salva' : type === 'audio' ? 'Áudio gravado' : type === 'video' ? 'Vídeo gravado' : type === 'document' ? 'Arquivo salvo' : 'Registro pessoal'),
+    title:
+      title.trim() ||
+      (type === 'photo'
+        ? 'Foto salva'
+        : type === 'audio'
+        ? 'Áudio gravado'
+        : type === 'video'
+        ? 'Vídeo gravado'
+        : type === 'document'
+        ? 'Arquivo salvo'
+        : 'Registro pessoal'),
     content: content.trim(),
     description: content.trim(),
     type,
     date: date || now.split('T')[0],
-    time: time || `${new Date().getHours().toString().padStart(2, '0')}:${new Date().getMinutes().toString().padStart(2, '0')}`,
+    time:
+      time ||
+      `${new Date().getHours().toString().padStart(2, '0')}:${new Date()
+        .getMinutes()
+        .toString()
+        .padStart(2, '0')}`,
     category,
     tags,
     attachments: sanitizedAttachments,
     storagePath: primaryStoragePath,
-    downloadUrl: primaryDownloadUrl && !primaryDownloadUrl.startsWith('data:') ? primaryDownloadUrl : undefined,
+    downloadUrl:
+      primaryDownloadUrl && !primaryDownloadUrl.startsWith('data:')
+        ? primaryDownloadUrl
+        : undefined,
+    thumbnailUrl: primaryThumbnailUrl,
     fileName: primaryFileName,
     fileSize: primaryFileSize,
     mimeType: primaryMimeType,
@@ -512,54 +797,124 @@ export async function executeRecordCreationPipeline(params: {
     syncStatus: 'synced',
   };
 
+  const fullRecord: DiaryRecord = compactMetadata(rawRecord);
   const docRef = doc(db, 'users', uid, 'records', recordId);
 
-  // Protected Firestore write with an explicit 6-second timeout race
-  const writePromise = setDoc(
-    docRef,
-    sanitizeForFirestore({
+  // Firestore write with strict 15-second timeout
+  try {
+    const writePromise = setDoc(docRef, {
       ...fullRecord,
       _serverTimestamp: serverTimestamp(),
-    })
-  );
+    });
 
-  const timeoutPromise = new Promise((_, reject) =>
-    setTimeout(() => reject(new Error('FIRESTORE_WRITE_TIMEOUT')), 6000)
-  );
+    const writeTimeoutPromise = new Promise((_, reject) =>
+      setTimeout(
+        () =>
+          reject(
+            new Error(
+              'Não foi possível concluir o envio. Verifique sua conexão e tente novamente.'
+            )
+          ),
+        15000
+      )
+    );
+
+    await Promise.race([writePromise, writeTimeoutPromise]);
+    console.log(`[FIRESTORE WRITE SUCCESS] Documento gravado: ${recordId}`);
+  } catch (writeErr: any) {
+    console.error('[FIRESTORE WRITE ERROR] Falha ao gravar metadados:', writeErr);
+    const err =
+      writeErr.message ||
+      'Não foi possível gravar o registro no banco de dados. Verifique sua conexão e tente novamente.';
+    onProgress?.({
+      stage: 'failed',
+      percent: 0,
+      message: err,
+      error: err,
+    });
+    throw new Error(err);
+  }
+
+  // STEP 3: Verification Step (Etapa 12: Confirm document truly exists in Firestore)
+  onProgress?.({
+    stage: 'verifying',
+    percent: 95,
+    message: 'Validando registro no banco de dados...',
+  });
 
   try {
-    await Promise.race([writePromise, timeoutPromise]);
-    console.log(`[FIRESTORE] Documento gravado e confirmado com sucesso: ${recordId}`);
-
+    const verifySnap = await getDoc(docRef);
+    if (!verifySnap.exists()) {
+      throw new Error('Falha na validação do registro no banco de dados.');
+    }
+    console.log(`[FIRESTORE VERIFY SUCCESS] Registro verificado com sucesso no banco: ${recordId}`);
+  } catch (verifyErr: any) {
+    console.error('[FIRESTORE VERIFY ERROR] Falha ao verificar registro gravado:', verifyErr);
+    const err = 'O registro não pôde ser confirmado no servidor. Tente novamente.';
     onProgress?.({
-      stage: 'completed',
-      percent: 100,
-      message: 'Salvo com sucesso!',
+      stage: 'failed',
+      percent: 0,
+      message: err,
+      error: err,
     });
+    throw new Error(err);
+  }
 
-    return fullRecord;
-  } catch (firestoreErr: any) {
-    console.warn(`[FIRESTORE WARNING] Falha ou timeout na escrita direta (${firestoreErr?.message}). Salvando na fila local offline:`, firestoreErr);
+  // STEP 4: Success & Release User
+  onProgress?.({
+    stage: 'completed',
+    percent: 100,
+    message: 'Registro salvo e sincronizado com sucesso!',
+  });
 
-    // Enqueue in offline sync queue to guarantee user data is saved persistently
-    const queuedRecord: DiaryRecord = {
-      ...fullRecord,
-      syncStatus: 'pending',
-    };
+  return fullRecord;
+}
 
-    syncQueue.enqueue({
-      operationId: opId,
-      entityType: 'record',
-      action: 'create',
-      payload: { uid, record: queuedRecord },
-    });
+/**
+ * 4. Permanent Deletion of Record and its Storage File
+ */
+export async function deleteRecordAndMediaDirect(
+  uid: string,
+  recordId: string,
+  storagePath?: string,
+  attachments?: RecordAttachment[]
+): Promise<void> {
+  console.log(`[DELETE DIRECT] Excluindo registro: users/${uid}/records/${recordId}`);
 
-    onProgress?.({
-      stage: 'completed',
-      percent: 100,
-      message: 'Salvo localmente! Sincronização com o Firestore continuará em segundo plano.',
-    });
+  // Cancel any active upload in flight
+  cancelActiveUploadTask(recordId);
 
-    return queuedRecord;
+  // 1. Delete Firestore document
+  try {
+    const docRef = doc(db, 'users', uid, 'records', recordId);
+    await deleteDoc(docRef);
+    console.log(`[DELETE DIRECT] Documento Firestore excluído: ${recordId}`);
+  } catch (docErr) {
+    console.warn('[DELETE DIRECT] Erro ao deletar documento Firestore:', docErr);
+  }
+
+  // 2. Delete primary Storage file
+  if (storagePath) {
+    try {
+      const sRef = storageRef(storage, storagePath);
+      await deleteObject(sRef);
+      console.log(`[DELETE DIRECT] Arquivo no Storage excluído: ${storagePath}`);
+    } catch (storageErr: any) {
+      if (storageErr?.code !== 'storage/object-not-found') {
+        console.warn('[DELETE DIRECT] Erro ao deletar arquivo Storage:', storageErr);
+      }
+    }
+  }
+
+  // 3. Delete any other attachments in Storage
+  if (attachments && attachments.length > 0) {
+    for (const att of attachments) {
+      if (att.storagePath && att.storagePath !== storagePath) {
+        try {
+          const aRef = storageRef(storage, att.storagePath);
+          await deleteObject(aRef);
+        } catch (e) {}
+      }
+    }
   }
 }

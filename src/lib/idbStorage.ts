@@ -197,6 +197,26 @@ export async function deleteQueueItem(id: string): Promise<void> {
   }
 }
 
+export async function deleteQueueItemsByRecordId(recordId: string): Promise<void> {
+  try {
+    const db = await openMediaDB();
+    const items = await getAllQueueItems();
+    const matching = items.filter((it) => it.recordId === recordId);
+    
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(QUEUE_STORE, 'readwrite');
+      const store = tx.objectStore(QUEUE_STORE);
+      for (const it of matching) {
+        store.delete(it.id);
+      }
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch (e) {
+    console.warn('[IDB] Warning deleting queue items for recordId:', e);
+  }
+}
+
 export async function clearFinishedQueueItems(userId: string): Promise<void> {
   try {
     const items = await getAllQueueItems(userId);
@@ -204,11 +224,46 @@ export async function clearFinishedQueueItems(userId: string): Promise<void> {
     const tx = db.transaction(QUEUE_STORE, 'readwrite');
     const store = tx.objectStore(QUEUE_STORE);
     for (const it of items) {
-      if (it.status === 'synced') {
+      if (
+        it.status === 'synced' ||
+        it.status === 'completed' ||
+        it.status === 'deleted' ||
+        it.status === 'cancelled'
+      ) {
         store.delete(it.id);
       }
     }
   } catch (e) {
     console.warn('[IDB] Warning clearing finished queue items:', e);
+  }
+}
+
+// ----------------------------------------------------
+// 3. Deleted Records Tombstone Store (Prevents Re-uploading)
+// ----------------------------------------------------
+const TOMBSTONE_STORAGE_KEY = 'diario_pessoal_tombstone_deleted_records';
+
+export function addDeletedTombstone(recordId: string): void {
+  try {
+    const raw = localStorage.getItem(TOMBSTONE_STORAGE_KEY) || '[]';
+    const list: string[] = JSON.parse(raw);
+    if (!list.includes(recordId)) {
+      list.push(recordId);
+      // Keep max 500 recent tombstones
+      const trimmed = list.slice(-500);
+      localStorage.setItem(TOMBSTONE_STORAGE_KEY, JSON.stringify(trimmed));
+    }
+  } catch (e) {
+    console.warn('[IDB] Tombstone store warning:', e);
+  }
+}
+
+export function isDeletedTombstoned(recordId: string): boolean {
+  try {
+    const raw = localStorage.getItem(TOMBSTONE_STORAGE_KEY) || '[]';
+    const list: string[] = JSON.parse(raw);
+    return list.includes(recordId);
+  } catch (e) {
+    return false;
   }
 }
