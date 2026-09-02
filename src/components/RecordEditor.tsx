@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { DiaryRecord, RecordAttachment, RecordType, UserProfile } from '../types';
 import { AudioProcessor, AudioCaptureResult } from '../lib/audioProcessor';
+import { saveLocalMediaBlob } from '../lib/idbStorage';
 import {
   validateFile,
   executeDirectSavePipeline,
@@ -160,6 +161,9 @@ export const RecordEditor: React.FC<RecordEditorProps> = ({
     // Create local object URL for preview
     const localUrl = URL.createObjectURL(file);
     setPreviewUrl(localUrl);
+
+    // Cache locally immediately so playback works seamlessly with 0 delay
+    saveLocalMediaBlob(recordId, file, val.fileName, file.type).catch(() => {});
 
     // If title is empty, automatically suggest file name
     if (!title.trim()) {

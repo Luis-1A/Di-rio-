@@ -195,6 +195,14 @@ async function startServer() {
   // Dedicated API Router for all server-side endpoints
   const apiRouter = express.Router();
 
+  // Raw binary middleware for high-speed direct binary video and media upload (up to 300MB)
+  const rawBinaryParser = express.raw({
+    type: () => true,
+    limit: '300mb',
+  });
+  apiRouter.use('/media/upload-binary', rawBinaryParser);
+  apiRouter.use('/upload-binary', rawBinaryParser);
+
   // API Health Check
   apiRouter.get('/health', (req, res) => {
     res.json({
@@ -204,7 +212,341 @@ async function startServer() {
     });
   });
 
-  // API: Robust File Upload (Supports base64 data & binary payloads with persistent serving)
+  // Helper function to stream file or buffer with full HTTP Range (206 Partial Content) support
+  const handleStreamResponse = async (
+    req: express.Request,
+    res: express.Response,
+    fileId: string,
+    forceBinaryDownload: boolean = false
+  ) => {
+    try {
+      // 1. Check in-memory files
+      const memFile = memoryFiles.get(fileId);
+      if (memFile) {
+        const buffer = memFile.buffer;
+        const totalSize = buffer.length;
+        const mimeType = forceBinaryDownload ? 'application/octet-stream' : memFile.mimeType;
+
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', '*');
+        res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges');
+        res.setHeader('Content-Type', mimeType);
+        res.setHeader(
+          'Content-Disposition',
+          `${forceBinaryDownload ? 'attachment' : 'inline'}; filename="${memFile.fileName}"`
+        );
+        res.setHeader('Accept-Ranges', 'bytes');
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+
+        const range = req.headers.range;
+        if (range && !forceBinaryDownload) {
+          const parts = range.replace(/bytes=/, '').split('-');
+          const start = parseInt(parts[0], 10) || 0;
+          const end = parts[1] ? parseInt(parts[1], 10) : totalSize - 1;
+          const chunkSize = end - start + 1;
+
+          res.writeHead(206, {
+            'Content-Range': `bytes ${start}-${end}/${totalSize}`,
+            'Content-Length': chunkSize,
+          });
+          return res.end(buffer.subarray(start, end + 1));
+        }
+
+        res.setHeader('Content-Length', totalSize);
+        return res.end(buffer);
+      }
+
+      // 2. Check disk files (match by exact fileId or prefix in UPLOADS_DIR)
+      let matchedFilePath: string | null = null;
+      let matchedFileName = `video_${fileId}.mp4`;
+      let matchedMime = 'video/mp4';
+
+      const metaPath = path.join(UPLOADS_DIR, `${fileId}.meta.json`);
+      if (fs.existsSync(metaPath)) {
+        try {
+          const metaRaw = await fsp.readFile(metaPath, 'utf-8');
+          const meta = JSON.parse(metaRaw);
+          matchedFileName = meta.fileName || matchedFileName;
+          matchedMime = meta.mimeType || matchedMime;
+          const candidatePath = path.join(UPLOADS_DIR, `${fileId}_${meta.fileName}`);
+          if (fs.existsSync(candidatePath)) {
+            matchedFilePath = candidatePath;
+          }
+        } catch (e) {}
+      }
+
+      if (!matchedFilePath) {
+        // Search files in directory starting with fileId
+        try {
+          const dirFiles = await fsp.readdir(UPLOADS_DIR);
+          const found = dirFiles.find((f) => f.startsWith(fileId) && !f.endsWith('.meta.json'));
+          if (found) {
+            matchedFilePath = path.join(UPLOADS_DIR, found);
+            matchedFileName = found.replace(new RegExp(`^${fileId}_?`), '');
+            if (matchedFileName.endsWith('.mp4')) matchedMime = 'video/mp4';
+            else if (matchedFileName.endsWith('.webm')) matchedMime = 'video/webm';
+            else if (matchedFileName.endsWith('.png')) matchedMime = 'image/png';
+            else if (matchedFileName.endsWith('.jpg') || matchedFileName.endsWith('.jpeg')) matchedMime = 'image/jpeg';
+            else if (matchedFileName.endsWith('.pdf')) matchedMime = 'application/pdf';
+          }
+        } catch (e) {}
+      }
+
+      if (matchedFilePath && fs.existsSync(matchedFilePath)) {
+        const stat = await fsp.stat(matchedFilePath);
+        const totalSize = stat.size;
+        const mimeType = forceBinaryDownload ? 'application/octet-stream' : matchedMime;
+
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', '*');
+        res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges');
+        res.setHeader('Content-Type', mimeType);
+        res.setHeader(
+          'Content-Disposition',
+          `${forceBinaryDownload ? 'attachment' : 'inline'}; filename="${matchedFileName}"`
+        );
+        res.setHeader('Accept-Ranges', 'bytes');
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+
+        const range = req.headers.range;
+        if (range && !forceBinaryDownload) {
+          const parts = range.replace(/bytes=/, '').split('-');
+          const start = parseInt(parts[0], 10) || 0;
+          const end = parts[1] ? parseInt(parts[1], 10) : totalSize - 1;
+          const chunkSize = end - start + 1;
+
+          res.writeHead(206, {
+            'Content-Range': `bytes ${start}-${end}/${totalSize}`,
+            'Content-Length': chunkSize,
+          });
+          const stream = fs.createReadStream(matchedFilePath, { start, end });
+          return stream.pipe(res);
+        }
+
+        res.setHeader('Content-Length', totalSize);
+        return fs.createReadStream(matchedFilePath).pipe(res);
+      }
+
+      return res.status(404).json({ error: 'Arquivo binário não encontrado no servidor.' });
+    } catch (err: any) {
+      console.error('[STREAM RESPONSE ERROR]', err);
+      return res.status(500).send('Erro na transmissão binária.');
+    }
+  };
+
+  // API: Raw Binary Video/Media Upload (Direct stream from device to server disk/memory - 0 base64 overhead)
+  const handleBinaryUpload = async (req: express.Request, res: express.Response) => {
+    try {
+      const rawHeaderName = (req.headers['x-file-name'] as string) || '';
+      let cleanFileName = 'video.mp4';
+      try {
+        cleanFileName = decodeURIComponent(rawHeaderName).replace(/[^a-zA-Z0-9._-]/g, '_');
+      } catch {
+        cleanFileName = rawHeaderName.replace(/[^a-zA-Z0-9._-]/g, '_') || `video_${Date.now()}.mp4`;
+      }
+      if (!cleanFileName || cleanFileName === '_') {
+        cleanFileName = `video_${Date.now()}.mp4`;
+      }
+
+      const mimeType = (req.headers['x-mime-type'] as string) || (req.headers['content-type'] as string) || 'video/mp4';
+      const recordId = (req.headers['x-record-id'] as string) || `rec_${Date.now()}`;
+      const userId = (req.headers['x-user-id'] as string) || 'user';
+      const category = (req.headers['x-category'] as string) || 'videos';
+      const fileId = recordId || `file_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+
+      const targetFilePath = path.join(UPLOADS_DIR, `${fileId}_${cleanFileName}`);
+      const metaFilePath = path.join(UPLOADS_DIR, `${fileId}.meta.json`);
+
+      // If body was already parsed as Buffer
+      if (Buffer.isBuffer(req.body) && req.body.length > 0) {
+        const fileBuffer = req.body;
+        await fsp.writeFile(targetFilePath, fileBuffer);
+        await fsp.writeFile(
+          metaFilePath,
+          JSON.stringify({
+            fileId,
+            fileName: cleanFileName,
+            mimeType,
+            fileSize: fileBuffer.length,
+            userId,
+            recordId,
+            category,
+            uploadedAt: new Date().toISOString(),
+          }, null, 2)
+        );
+
+        if (fileBuffer.length < 35 * 1024 * 1024) {
+          memoryFiles.set(fileId, {
+            fileName: cleanFileName,
+            mimeType,
+            buffer: fileBuffer,
+          });
+        }
+
+        console.log(`[BINARY UPLOAD] Vídeo binário salvo com sucesso (${fileBuffer.length} bytes): ${cleanFileName}`);
+
+        return res.json({
+          success: true,
+          fileId,
+          url: `/api/media/stream/${fileId}`,
+          streamUrl: `/api/media/stream/${fileId}`,
+          binaryUrl: `/api/media/binary/${fileId}`,
+          fileName: cleanFileName,
+          fileSize: fileBuffer.length,
+          mimeType,
+          mode: 'binary',
+        });
+      }
+
+      // Otherwise, pipe raw stream directly to disk write stream
+      const writeStream = fs.createWriteStream(targetFilePath);
+      const memoryChunks: Buffer[] = [];
+      let totalBytes = 0;
+
+      req.on('data', (chunk: Buffer) => {
+        totalBytes += chunk.length;
+        if (totalBytes < 35 * 1024 * 1024) {
+          memoryChunks.push(chunk);
+        }
+      });
+
+      req.pipe(writeStream);
+
+      writeStream.on('finish', async () => {
+        try {
+          await fsp.writeFile(
+            metaFilePath,
+            JSON.stringify({
+              fileId,
+              fileName: cleanFileName,
+              mimeType,
+              fileSize: totalBytes,
+              userId,
+              recordId,
+              category,
+              uploadedAt: new Date().toISOString(),
+            }, null, 2)
+          );
+
+          if (memoryChunks.length > 0 && totalBytes < 35 * 1024 * 1024) {
+            memoryFiles.set(fileId, {
+              fileName: cleanFileName,
+              mimeType,
+              buffer: Buffer.concat(memoryChunks),
+            });
+          }
+
+          console.log(`[BINARY STREAM UPLOAD] Vídeo gravado em binário (${totalBytes} bytes): ${cleanFileName}`);
+
+          res.json({
+            success: true,
+            fileId,
+            url: `/api/media/stream/${fileId}`,
+            streamUrl: `/api/media/stream/${fileId}`,
+            binaryUrl: `/api/media/binary/${fileId}`,
+            fileName: cleanFileName,
+            fileSize: totalBytes,
+            mimeType,
+            mode: 'binary_stream',
+          });
+        } catch (postErr) {
+          console.error('[POST STREAM ERROR]', postErr);
+          res.json({
+            success: true,
+            fileId,
+            url: `/api/media/stream/${fileId}`,
+            streamUrl: `/api/media/stream/${fileId}`,
+            binaryUrl: `/api/media/binary/${fileId}`,
+            fileName: cleanFileName,
+            fileSize: totalBytes,
+            mimeType,
+          });
+        }
+      });
+
+      writeStream.on('error', (err) => {
+        console.error('[BINARY WRITE STREAM ERROR]', err);
+        res.status(500).json({ error: 'Erro ao gravar binário no disco do servidor.' });
+      });
+    } catch (err: any) {
+      console.error('[HANDLE BINARY UPLOAD ERROR]', err);
+      res.status(500).json({ error: err.message || 'Falha no upload binário.' });
+    }
+  };
+
+  // Mount Binary Upload Endpoints
+  apiRouter.post('/media/upload-binary', handleBinaryUpload);
+  apiRouter.post('/upload-binary', handleBinaryUpload);
+
+  // Mount Video Range Streaming Endpoints (Supports byte ranges, seek, fast start)
+  apiRouter.get('/media/stream/:fileId', (req, res) => {
+    handleStreamResponse(req, res, req.params.fileId, false);
+  });
+
+  // Proxy endpoint for remote media (e.g. Firebase Storage) to bypass CORS and stream with byte range support
+  apiRouter.get('/media/proxy', async (req, res) => {
+    try {
+      const rawUrl = req.query.url as string;
+      if (!rawUrl || !rawUrl.startsWith('http')) {
+        return res.status(400).json({ error: 'URL inválida para proxy' });
+      }
+
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', '*');
+      res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges');
+
+      const headers: Record<string, string> = {};
+      if (req.headers.range) {
+        headers['range'] = req.headers.range;
+      }
+
+      const upstream = await fetch(rawUrl, { headers });
+      res.status(upstream.status);
+
+      const contentType = upstream.headers.get('content-type') || 'video/mp4';
+      const contentLength = upstream.headers.get('content-length');
+      const contentRange = upstream.headers.get('content-range');
+      const acceptRanges = upstream.headers.get('accept-ranges') || 'bytes';
+
+      res.setHeader('Content-Type', contentType);
+      res.setHeader('Accept-Ranges', acceptRanges);
+      if (contentLength) res.setHeader('Content-Length', contentLength);
+      if (contentRange) res.setHeader('Content-Range', contentRange);
+
+      if (upstream.body) {
+        // Node 18+ Web Streams to Node Response
+        const reader = upstream.body.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) res.write(Buffer.from(value));
+        }
+        return res.end();
+      } else {
+        return res.end();
+      }
+    } catch (err: any) {
+      console.error('[MEDIA PROXY ERROR]', err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Falha ao transmitir mídia via proxy' });
+      }
+    }
+  });
+
+  // Mount Direct Binary Download Endpoint (Returns raw application/octet-stream)
+  apiRouter.get('/media/binary/:fileId', (req, res) => {
+    handleStreamResponse(req, res, req.params.fileId, true);
+  });
+
+  // Legacy & general file streaming
+  apiRouter.get('/files/:fileId', (req, res) => {
+    handleStreamResponse(req, res, req.params.fileId, false);
+  });
+
+  // API: Robust File Upload (Fallback for JSON base64 payloads)
   apiRouter.post('/upload', async (req, res) => {
     try {
       const { fileName, mimeType, dataBase64, userId, recordId } = req.body;
@@ -214,14 +556,14 @@ async function startServer() {
 
       const cleanFileName = (fileName || `arquivo_${Date.now()}`).replace(/[^a-zA-Z0-9._-]/g, '_');
       const safeMimeType = mimeType || 'application/octet-stream';
-      const fileId = `file_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+      const fileId = recordId || `file_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 
-      // Decode base64 payload
+      // Decode base64 payload into binary Buffer
       const pureBase64 = dataBase64.replace(/^data:[^;]+;base64,/, '');
       const fileBuffer = Buffer.from(pureBase64, 'base64');
       const fileSize = fileBuffer.length;
 
-      // Persist to disk
+      // Persist to disk as pure binary
       let savedToDisk = false;
       const targetFilePath = path.join(UPLOADS_DIR, `${fileId}_${cleanFileName}`);
       const metaFilePath = path.join(UPLOADS_DIR, `${fileId}.meta.json`);
@@ -231,13 +573,14 @@ async function startServer() {
         await fsp.writeFile(
           metaFilePath,
           JSON.stringify({
+            fileId,
             fileName: cleanFileName,
             mimeType: safeMimeType,
             fileSize,
             userId,
             recordId,
             createdAt: new Date().toISOString(),
-          })
+          }, null, 2)
         );
         savedToDisk = true;
       } catch (fsErr) {
@@ -251,15 +594,17 @@ async function startServer() {
         buffer: fileBuffer,
       });
 
-      const fileServingUrl = `/api/files/${fileId}`;
+      const fileServingUrl = `/api/media/stream/${fileId}`;
       console.log(
-        `[SERVER UPLOAD] Arquivo salvo (${savedToDisk ? 'disco+memória' : 'memória'}): ${cleanFileName} (${safeMimeType}, ${fileSize} bytes) -> ${fileServingUrl}`
+        `[SERVER UPLOAD] Arquivo salvo em binário (${savedToDisk ? 'disco+memória' : 'memória'}): ${cleanFileName} (${safeMimeType}, ${fileSize} bytes) -> ${fileServingUrl}`
       );
 
       res.json({
         success: true,
         fileId,
         url: fileServingUrl,
+        streamUrl: fileServingUrl,
+        binaryUrl: `/api/media/binary/${fileId}`,
         fileName: cleanFileName,
         fileSize,
         mimeType: safeMimeType,
@@ -268,66 +613,6 @@ async function startServer() {
     } catch (err: any) {
       console.error('[SERVER UPLOAD ERROR]', err);
       res.status(500).json({ error: err.message || 'Falha no upload do servidor.' });
-    }
-  });
-
-  // API: File Serving with Range Support for audio/video streaming & documents
-  apiRouter.get('/files/:fileId', async (req, res) => {
-    try {
-      const { fileId } = req.params;
-      if (!fileId || typeof fileId !== 'string') {
-        return res.status(400).send('ID de arquivo inválido.');
-      }
-
-      // Check memory cache first
-      const memFile = memoryFiles.get(fileId);
-      if (memFile) {
-        res.setHeader('Content-Type', memFile.mimeType);
-        res.setHeader('Content-Disposition', `inline; filename="${memFile.fileName}"`);
-        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-        res.setHeader('Accept-Ranges', 'bytes');
-        return res.send(memFile.buffer);
-      }
-
-      // Check disk
-      const metaPath = path.join(UPLOADS_DIR, `${fileId}.meta.json`);
-      if (fs.existsSync(metaPath)) {
-        const metaRaw = await fsp.readFile(metaPath, 'utf-8');
-        const meta = JSON.parse(metaRaw);
-        const diskFilePath = path.join(UPLOADS_DIR, `${fileId}_${meta.fileName}`);
-
-        if (fs.existsSync(diskFilePath)) {
-          const stat = await fsp.stat(diskFilePath);
-          const range = req.headers.range;
-
-          res.setHeader('Content-Type', meta.mimeType || 'application/octet-stream');
-          res.setHeader('Content-Disposition', `inline; filename="${meta.fileName}"`);
-          res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-          res.setHeader('Accept-Ranges', 'bytes');
-
-          if (range) {
-            const parts = range.replace(/bytes=/, '').split('-');
-            const start = parseInt(parts[0], 10);
-            const end = parts[1] ? parseInt(parts[1], 10) : stat.size - 1;
-            const chunksize = end - start + 1;
-            const fileStream = fs.createReadStream(diskFilePath, { start, end });
-            res.writeHead(206, {
-              'Content-Range': `bytes ${start}-${end}/${stat.size}`,
-              'Content-Length': chunksize,
-            });
-            return fileStream.pipe(res);
-          } else {
-            res.setHeader('Content-Length', stat.size);
-            return fs.createReadStream(diskFilePath).pipe(res);
-          }
-        }
-      }
-
-      // If file not found
-      return res.status(404).send('Arquivo não encontrado no servidor.');
-    } catch (err: any) {
-      console.error('[SERVER FILE SERVE ERROR]', err);
-      res.status(500).send('Erro ao carregar arquivo.');
     }
   });
 

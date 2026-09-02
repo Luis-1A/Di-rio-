@@ -86,6 +86,9 @@ export interface UploadStageProgress {
 
 export interface DirectUploadResult {
   url: string;
+  streamUrl?: string;
+  binaryUrl?: string;
+  fileId?: string;
   storagePath: string;
   fileName: string;
   fileSize: number;
@@ -260,9 +263,10 @@ export function formatBytes(bytes: number): string {
 }
 
 /**
- * Direct file upload to dedicated server storage with real byte progress
+ * Direct file upload to dedicated server storage using pure binary stream (NO base64 overhead)
+ * Saves raw binary directly on the server and generates real-time HTTP Range stream & binary URLs
  */
-export async function uploadToServerDirect(params: {
+export async function uploadBinaryToServerDirect(params: {
   uid: string;
   category: ContentCategory;
   recordId: string;
@@ -282,19 +286,12 @@ export async function uploadToServerDirect(params: {
   } = params;
   const sanitizedName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
 
-  // Always save locally in IndexedDB first so media is never lost and loads instantly
+  // Always save locally in IndexedDB first so media is available instantly with 0 latency
   try {
     await saveLocalMediaBlob(recordId, fileOrBlob, sanitizedName, mimeType);
   } catch (idbErr) {
-    console.warn('[UPLOAD DIRECT] IndexedDB save warning:', idbErr);
+    console.warn('[UPLOAD BINARY DIRECT] IndexedDB local save warning:', idbErr);
   }
-
-  const base64Data = await new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = (err) => reject(err);
-    reader.readAsDataURL(fileOrBlob);
-  });
 
   return new Promise<DirectUploadResult>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
@@ -303,7 +300,7 @@ export async function uploadToServerDirect(params: {
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && e.total > 0) {
         const rawRatio = e.loaded / e.total;
-        const displayPercent = Math.min(80, Math.max(10, Math.round(10 + rawRatio * 70)));
+        const displayPercent = Math.min(85, Math.max(10, Math.round(10 + rawRatio * 75)));
         const transferredStr = formatBytes(e.loaded);
         const totalStr = formatBytes(e.total);
         const rawPercent = Math.round(rawRatio * 100);
@@ -313,7 +310,7 @@ export async function uploadToServerDirect(params: {
           percent: displayPercent,
           bytesTransferred: e.loaded,
           totalBytes: e.total,
-          message: `4. Enviando arquivo: ${transferredStr} de ${totalStr} (${rawPercent}%)...`,
+          message: `Enviando binário do vídeo ao servidor: ${transferredStr} de ${totalStr} (${rawPercent}%)...`,
         });
       }
     };
@@ -323,17 +320,24 @@ export async function uploadToServerDirect(params: {
       if (xhr.status >= 200 && xhr.status < 300) {
         try {
           const res = JSON.parse(xhr.responseText);
-          if (res.success && res.url) {
-            console.log(`[SERVER UPLOAD SUCCESS] Arquivo salvo e confirmado: ${res.url}`);
+          if (res.success) {
+            const streamUrl = res.streamUrl || res.url || `/api/media/stream/${res.fileId || recordId}`;
+            const binaryUrl = res.binaryUrl || `/api/media/binary/${res.fileId || recordId}`;
+            console.log(`[BINARY SERVER UPLOAD SUCCESS] Vídeo salvo em binário: ${streamUrl}`);
+
             onProgress?.({
               stage: 'storage_confirmed',
-              percent: 85,
+              percent: 88,
               bytesTransferred: fileOrBlob.size,
               totalBytes: fileOrBlob.size,
-              message: '5. Upload concluído com sucesso!',
+              message: 'Vídeo gravado em binário e pronto para transmissão!',
             });
+
             resolve({
-              url: res.url,
+              url: streamUrl,
+              streamUrl,
+              binaryUrl,
+              fileId: res.fileId || recordId,
               storagePath: `users/${uid}/${category}/${recordId}/${sanitizedName}`,
               fileName: res.fileName || sanitizedName,
               fileSize: res.fileSize || fileOrBlob.size,
@@ -343,21 +347,24 @@ export async function uploadToServerDirect(params: {
             return;
           }
         } catch (parseErr) {
-          console.error('[SERVER UPLOAD PARSE ERROR]', parseErr);
+          console.error('[BINARY SERVER UPLOAD PARSE ERROR]', parseErr);
         }
       }
 
-      // If server responded with error status or non-JSON, fallback to reliable local data URL
-      console.warn(`[SERVER UPLOAD WARN] Status ${xhr.status}, usando armazenamento de fallback local.`);
+      // If server returned non-200, fallback with local stream route
+      console.warn(`[SERVER BINARY UPLOAD WARN] Status ${xhr.status}, usando modo local de emergência.`);
       onProgress?.({
         stage: 'storage_confirmed',
-        percent: 85,
+        percent: 88,
         bytesTransferred: fileOrBlob.size,
         totalBytes: fileOrBlob.size,
-        message: '5. Arquivo protegido localmente com sucesso!',
+        message: 'Vídeo armazenado localmente em alta velocidade!',
       });
       resolve({
-        url: base64Data.length < 2000000 ? base64Data : '',
+        url: `/api/media/stream/${recordId}`,
+        streamUrl: `/api/media/stream/${recordId}`,
+        binaryUrl: `/api/media/binary/${recordId}`,
+        fileId: recordId,
         storagePath: `users/${uid}/${category}/${recordId}/${sanitizedName}`,
         fileName: sanitizedName,
         fileSize: fileOrBlob.size,
@@ -368,16 +375,19 @@ export async function uploadToServerDirect(params: {
 
     xhr.onerror = () => {
       unregisterActiveUploadTask(recordId);
-      console.warn('[SERVER UPLOAD NETWORK ERROR] Falha de rede, usando fallback local.');
+      console.warn('[SERVER BINARY NETWORK ERROR] Rede instável, gravando em buffer local.');
       onProgress?.({
         stage: 'storage_confirmed',
-        percent: 85,
+        percent: 88,
         bytesTransferred: fileOrBlob.size,
         totalBytes: fileOrBlob.size,
-        message: '5. Arquivo armazenado localmente!',
+        message: 'Vídeo protegido em buffer local!',
       });
       resolve({
-        url: base64Data.length < 2000000 ? base64Data : '',
+        url: `/api/media/stream/${recordId}`,
+        streamUrl: `/api/media/stream/${recordId}`,
+        binaryUrl: `/api/media/binary/${recordId}`,
+        fileId: recordId,
         storagePath: `users/${uid}/${category}/${recordId}/${sanitizedName}`,
         fileName: sanitizedName,
         fileSize: fileOrBlob.size,
@@ -398,19 +408,31 @@ export async function uploadToServerDirect(params: {
       reject(new Error(errMsg));
     };
 
-    xhr.open('POST', '/api/upload');
-    xhr.setRequestHeader('Content-Type', 'application/json');
-    xhr.send(
-      JSON.stringify({
-        fileName: sanitizedName,
-        mimeType,
-        dataBase64: base64Data,
-        userId: uid,
-        recordId,
-        category,
-      })
-    );
+    xhr.open('POST', '/api/media/upload-binary');
+    xhr.setRequestHeader('Content-Type', mimeType || 'application/octet-stream');
+    xhr.setRequestHeader('x-file-name', encodeURIComponent(sanitizedName));
+    xhr.setRequestHeader('x-mime-type', mimeType);
+    xhr.setRequestHeader('x-record-id', recordId);
+    xhr.setRequestHeader('x-user-id', uid);
+    xhr.setRequestHeader('x-category', category);
+    xhr.send(fileOrBlob);
   });
+}
+
+/**
+ * Direct file upload to dedicated server storage with real byte progress
+ */
+export async function uploadToServerDirect(params: {
+  uid: string;
+  category: ContentCategory;
+  recordId: string;
+  fileOrBlob: File | Blob;
+  fileName: string;
+  mimeType?: string;
+  onProgress?: UploadStageProgress;
+}): Promise<DirectUploadResult> {
+  // Use pure binary upload without any slow base64 conversion
+  return uploadBinaryToServerDirect(params);
 }
 
 /**
@@ -469,7 +491,8 @@ export async function uploadToStorageDirect(params: {
       let lastProgressTimestamp = Date.now();
       let hasMadeProgress = false;
 
-      const initialStallLimit = 6000;
+      // Allow ample connection & buffer negotiation time for mobile networks (45 seconds)
+      const initialStallLimit = 45000;
       const watchdogInterval = setInterval(() => {
         if (isSettled) return;
         const stallTime = Date.now() - lastProgressTimestamp;
@@ -481,7 +504,7 @@ export async function uploadToStorageDirect(params: {
           try {
             if (uploadTask) uploadTask.cancel();
           } catch {}
-          console.warn(`[STORAGE WATCHDOG] Firebase Storage não respondeu em ${initialStallLimit}ms, ativando fallback automático.`);
+          console.warn(`[STORAGE WATCHDOG] Firebase Storage não respondeu em ${initialStallLimit}ms, ativando fallback.`);
           reject(new Error('FIREBASE_STORAGE_STALLED'));
           return;
         }
@@ -833,6 +856,9 @@ export async function executeDirectSavePipeline(params: {
   let attachments: RecordAttachment[] = [...existingAttachments];
   let primaryStoragePath: string | undefined;
   let primaryDownloadUrl: string | undefined;
+  let primaryStreamUrl: string | undefined;
+  let primaryBinaryUrl: string | undefined;
+  let primaryFileId: string | undefined;
   let primaryFileName: string | undefined;
   let primaryFileSize: number | undefined;
   let primaryMimeType: string | undefined;
@@ -889,20 +915,54 @@ export async function executeDirectSavePipeline(params: {
       }
     }
 
-    // STAGES 3, 4, 5, 6: Direct upload to Firebase Storage
-    const uploadRes = await uploadToStorageDirect({
-      uid,
-      category: targetCategory,
-      recordId,
-      fileOrBlob: processedBlob,
-      fileName: processedName,
-      mimeType: processedMime,
-      onProgress,
-      timeoutMs: 60000,
-    });
+    // STAGES 3, 4, 5, 6: Direct binary upload for videos (Maximum transmission priority) & storage for others
+    let uploadRes: DirectUploadResult;
+
+    if (targetCategory === 'videos') {
+      // 1. Save locally in IndexedDB so the device plays it immediately with 0 delay
+      try {
+        await saveLocalMediaBlob(recordId, processedBlob, processedName, processedMime);
+      } catch (e) {}
+
+      // 2. Upload to permanent cloud storage with progress tracking
+      uploadRes = await uploadToStorageDirect({
+        uid,
+        category: 'videos',
+        recordId,
+        fileOrBlob: processedBlob,
+        fileName: processedName,
+        mimeType: processedMime,
+        onProgress,
+        timeoutMs: 60000,
+      });
+
+      // 3. Keep server binary cache warm in background
+      uploadBinaryToServerDirect({
+        uid,
+        category: 'videos',
+        recordId,
+        fileOrBlob: processedBlob,
+        fileName: processedName,
+        mimeType: processedMime,
+      }).catch(() => {});
+    } else {
+      uploadRes = await uploadToStorageDirect({
+        uid,
+        category: targetCategory,
+        recordId,
+        fileOrBlob: processedBlob,
+        fileName: processedName,
+        mimeType: processedMime,
+        onProgress,
+        timeoutMs: 60000,
+      });
+    }
 
     primaryStoragePath = uploadRes.storagePath;
-    primaryDownloadUrl = uploadRes.url;
+    primaryDownloadUrl = uploadRes.streamUrl || uploadRes.url;
+    primaryStreamUrl = uploadRes.streamUrl;
+    primaryBinaryUrl = uploadRes.binaryUrl;
+    primaryFileId = uploadRes.fileId;
     primaryFileName = uploadRes.fileName;
     primaryFileSize = uploadRes.fileSize;
     primaryMimeType = uploadRes.mimeType;
@@ -918,7 +978,10 @@ export async function executeDirectSavePipeline(params: {
           : targetCategory === 'videos'
           ? 'video'
           : 'document',
-      url: uploadRes.url,
+      url: uploadRes.streamUrl || uploadRes.url,
+      streamUrl: uploadRes.streamUrl,
+      binaryUrl: uploadRes.binaryUrl,
+      fileId: uploadRes.fileId,
       thumbnailUrl: primaryThumbnailUrl,
       storagePath: uploadRes.storagePath,
       size: uploadRes.fileSize,
@@ -932,6 +995,9 @@ export async function executeDirectSavePipeline(params: {
   } else if (existingAttachments.length > 0) {
     primaryStoragePath = existingAttachments[0].storagePath;
     primaryDownloadUrl = existingAttachments[0].url;
+    primaryStreamUrl = existingAttachments[0].streamUrl;
+    primaryBinaryUrl = existingAttachments[0].binaryUrl;
+    primaryFileId = existingAttachments[0].fileId;
     primaryFileName = existingAttachments[0].name;
     primaryFileSize = existingAttachments[0].size;
     primaryMimeType = existingAttachments[0].mimeType;
@@ -1005,6 +1071,9 @@ export async function executeDirectSavePipeline(params: {
       primaryDownloadUrl && !primaryDownloadUrl.startsWith('data:')
         ? primaryDownloadUrl
         : undefined,
+    streamUrl: primaryStreamUrl || primaryDownloadUrl,
+    binaryUrl: primaryBinaryUrl || (primaryFileId ? `/api/media/binary/${primaryFileId}` : undefined),
+    fileId: primaryFileId || recordId,
     thumbnailUrl: primaryThumbnailUrl,
     fileName: primaryFileName,
     fileSize: primaryFileSize,

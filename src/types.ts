@@ -36,7 +36,10 @@ export interface RecordAttachment {
   id: string;
   name: string;
   type: 'image' | 'video' | 'audio' | 'document';
-  url: string; // Storage download URL or data URL
+  url: string; // Storage download URL, stream URL or data URL
+  streamUrl?: string; // Direct server binary HTTP Range stream
+  binaryUrl?: string; // Direct server binary payload URL
+  fileId?: string;
   storagePath?: string;
   thumbnailUrl?: string;
   size: number;
@@ -60,6 +63,9 @@ export interface DiaryRecord {
   attachments: RecordAttachment[];
   storagePath?: string;
   downloadUrl?: string;
+  streamUrl?: string;
+  binaryUrl?: string;
+  fileId?: string;
   thumbnailUrl?: string;
   mimeType?: string;
   fileName?: string;

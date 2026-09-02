@@ -48,7 +48,7 @@ export async function cacheMediaToLocal(
   onProgress?: (percent: number) => void
 ): Promise<string | null> {
   const meta = extractMediaMetadata(record);
-  let targetUrl = meta.primaryUrl;
+  let targetUrl = meta.binaryUrl || meta.streamUrl || meta.primaryUrl;
 
   if (!targetUrl && meta.storagePath) {
     try {
@@ -60,7 +60,7 @@ export async function cacheMediaToLocal(
     }
   }
 
-  if (!targetUrl || !targetUrl.startsWith('http')) {
+  if (!targetUrl || (!targetUrl.startsWith('http') && !targetUrl.startsWith('/'))) {
     return null;
   }
 
@@ -111,6 +111,9 @@ export async function cacheMediaToLocal(
  */
 export function extractMediaMetadata(record: DiaryRecord): {
   primaryUrl: string;
+  streamUrl?: string;
+  binaryUrl?: string;
+  fileId: string;
   storagePath?: string;
   thumbnailUrl?: string;
   mimeType: string;
@@ -120,7 +123,22 @@ export function extractMediaMetadata(record: DiaryRecord): {
 } {
   const att = record.attachments && record.attachments.length > 0 ? record.attachments[0] : null;
 
-  const rawUrl = att?.url || record.downloadUrl || '';
+  const fileId = record.fileId || att?.fileId || record.id;
+  const isVideo = record.type === 'video' || (att?.type === 'video');
+
+  const streamUrl =
+    record.streamUrl ||
+    att?.streamUrl ||
+    (isVideo ? `/api/media/stream/${fileId}` : undefined) ||
+    (att?.url && att.url.startsWith('/api/') ? att.url : undefined) ||
+    (record.downloadUrl && record.downloadUrl.startsWith('/api/') ? record.downloadUrl : undefined);
+
+  const binaryUrl =
+    record.binaryUrl ||
+    att?.binaryUrl ||
+    `/api/media/binary/${fileId}`;
+
+  const rawUrl = streamUrl || att?.url || record.downloadUrl || '';
   const storagePath = att?.storagePath || record.storagePath;
   const thumbnailUrl = att?.thumbnailUrl || record.thumbnailUrl;
   const fileName = att?.name || record.fileName || `arquivo_${record.id}`;
@@ -141,6 +159,9 @@ export function extractMediaMetadata(record: DiaryRecord): {
 
   return {
     primaryUrl: rawUrl,
+    streamUrl,
+    binaryUrl,
+    fileId,
     storagePath,
     thumbnailUrl,
     mimeType,
@@ -153,11 +174,10 @@ export function extractMediaMetadata(record: DiaryRecord): {
 /**
  * Resolves a media file from:
  * 1. In-memory URL cache
- * 2. Local IndexedDB Cache
- * 3. Direct HTTP/Storage URL (Live progressive streaming over internet)
- * 4. Firebase Storage SDK getDownloadURL
- *
- * And stores a copy in IndexedDB in the background for instant future loads.
+ * 2. Local IndexedDB Cache (Instant offline / zero latency)
+ * 3. Server Direct Binary Stream (/api/media/stream/:fileId with HTTP 206 Range)
+ * 4. Background binary download (/api/media/binary/:fileId to IndexedDB)
+ * 5. Firebase Storage fallback
  */
 export async function resolveMediaSource(
   record: DiaryRecord,
@@ -172,7 +192,7 @@ export async function resolveMediaSource(
     return { url: memoryCached, mimeType: meta.mimeType, isFromCache: true };
   }
 
-  // 2. Check Local IndexedDB (Instant local playback)
+  // 2. Check Local IndexedDB (Instant local playback with 0 data usage)
   try {
     const localItem = await getLocalMediaBlob(record.id);
     if (localItem && localItem.blob && localItem.blob.size > 0) {
@@ -184,14 +204,35 @@ export async function resolveMediaSource(
     console.warn('[MEDIA RESOLVER] IndexedDB read warning:', err);
   }
 
-  // 3. Direct URL available (Firebase Storage public URL, live streaming or data URL)
+  // 3. Reliable video stream resolution
+  if (record.type === 'video' || meta.mimeType.startsWith('video/')) {
+    const streamTarget = meta.primaryUrl || meta.streamUrl || `/api/media/stream/${meta.fileId}`;
+    inMemoryUrlCache.set(record.id, streamTarget);
+
+    // In parallel, fetch the raw binary and store in IndexedDB cache for permanent offline speed
+    if (saveToCacheInBackground && typeof fetch !== 'undefined') {
+      const binaryTarget = meta.binaryUrl || `/api/media/binary/${meta.fileId}`;
+      fetch(binaryTarget)
+        .then((res) => (res.ok ? res.blob() : null))
+        .then((blob) => {
+          if (blob && blob.size > 0) {
+            saveLocalMediaBlob(record.id, blob, meta.fileName, meta.mimeType).catch(() => {});
+          }
+        })
+        .catch(() => {});
+    }
+
+    return { url: streamTarget, mimeType: meta.mimeType || 'video/mp4', isFromCache: false };
+  }
+
+  // 4. Direct URL available (Server stream, Storage public URL, or data URL)
   if (meta.primaryUrl && (meta.primaryUrl.startsWith('http') || meta.primaryUrl.startsWith('/api/') || meta.primaryUrl.startsWith('data:'))) {
     inMemoryUrlCache.set(record.id, meta.primaryUrl);
 
-    // Save to local cache in the background for files up to 50MB
+    // Save to local cache in the background
     if (
       saveToCacheInBackground &&
-      meta.primaryUrl.startsWith('http') &&
+      (meta.primaryUrl.startsWith('http') || meta.primaryUrl.startsWith('/api/')) &&
       typeof fetch !== 'undefined' &&
       (!meta.fileSize || meta.fileSize < 50 * 1024 * 1024)
     ) {
@@ -208,20 +249,11 @@ export async function resolveMediaSource(
     return { url: meta.primaryUrl, mimeType: meta.mimeType, isFromCache: false };
   }
 
-  // 4. Resolve via Firebase Storage storagePath with timeout
+  // 5. If storagePath is present, get authorized live Firebase Storage URL
   if (meta.storagePath) {
     try {
-      const fetchPromise = (async () => {
-        const sRef = storageRef(storage, meta.storagePath);
-        const url = await getDownloadURL(sRef);
-        return url;
-      })();
-
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('Tempo limite excedido ao buscar arquivo na nuvem.')), timeoutMs)
-      );
-
-      const downloadUrl = await Promise.race([fetchPromise, timeoutPromise]);
+      const sRef = storageRef(storage, meta.storagePath);
+      const downloadUrl = await getDownloadURL(sRef);
       inMemoryUrlCache.set(record.id, downloadUrl);
 
       // Background caching
@@ -241,8 +273,30 @@ export async function resolveMediaSource(
       }
 
       return { url: downloadUrl, mimeType: meta.mimeType, isFromCache: false };
+    } catch (storageErr) {
+      console.warn('[MEDIA RESOLVER] Firebase Storage resolve error for path:', meta.storagePath, storageErr);
+    }
+  }
+
+  // 5. Secondary fallback: resolve via Firebase Storage storagePath with timeout
+  if (meta.storagePath) {
+    try {
+      const fetchPromise = (async () => {
+        const sRef = storageRef(storage, meta.storagePath!);
+        const url = await getDownloadURL(sRef);
+        return url;
+      })();
+
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('Tempo limite excedido ao buscar arquivo na nuvem.')), timeoutMs)
+      );
+
+      const downloadUrl = await Promise.race([fetchPromise, timeoutPromise]);
+      inMemoryUrlCache.set(record.id, downloadUrl);
+
+      return { url: downloadUrl, mimeType: meta.mimeType, isFromCache: false };
     } catch (storageErr: any) {
-      console.warn('[MEDIA RESOLVER] Firebase Storage resolve warning for', meta.storagePath, storageErr);
+      console.warn('[MEDIA RESOLVER] Secondary Storage fallback error:', storageErr);
       throw storageErr;
     }
   }
