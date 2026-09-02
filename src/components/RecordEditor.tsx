@@ -721,13 +721,18 @@ export const RecordEditor: React.FC<RecordEditorProps> = ({
                       }`}
                     >
                       {uploadStage === 'selected' && 'Arquivo pronto no dispositivo'}
-                      {uploadStage === 'validating' && 'Validando arquivo...'}
-                      {uploadStage === 'uploading' && 'Enviando arquivo para a nuvem...'}
-                      {uploadStage === 'storage_confirmed' && 'Arquivo enviado ao Storage!'}
-                      {uploadStage === 'saving_record' && 'Gravando metadados no Firestore...'}
-                      {uploadStage === 'verifying' && 'Validando registro no banco de dados...'}
-                      {uploadStage === 'completed' && 'Salvo e confirmado na nuvem!'}
+                      {uploadStage === 'auth_checking' && '1. Verificando autenticação...'}
+                      {uploadStage === 'validating' && '2. Preparando dados e arquivo...'}
+                      {uploadStage === 'connecting_storage' && '3. Conectando ao Storage...'}
+                      {uploadStage === 'uploading' && '4. Enviando arquivo para o Storage...'}
+                      {uploadStage === 'storage_confirmed' && '5. Upload concluído com sucesso!'}
+                      {uploadStage === 'obtaining_url' && '6. Obtendo URL segura...'}
+                      {uploadStage === 'saving_record' && '7. Gravando metadados no Firestore...'}
+                      {uploadStage === 'verifying' && '8. Confirmando gravação no banco...'}
+                      {uploadStage === 'syncing_ui' && '9. Sincronizando interface...'}
+                      {uploadStage === 'completed' && '10. Salvo e confirmado na nuvem!'}
                       {uploadStage === 'failed' && 'Falha no envio'}
+                      {uploadStage === 'canceled' && 'Envio cancelado'}
                     </span>
                   </div>
 

@@ -70,6 +70,34 @@
       "schema": "DiaryRecord",
       "description": "User diary records collection"
     },
+    "/users/{userId}/texts/{recordId}": {
+      "schema": "DiaryRecord",
+      "description": "User pure text records"
+    },
+    "/users/{userId}/images/{recordId}": {
+      "schema": "DiaryRecord",
+      "description": "User photo/image records"
+    },
+    "/users/{userId}/audios/{recordId}": {
+      "schema": "DiaryRecord",
+      "description": "User audio recording records"
+    },
+    "/users/{userId}/videos/{recordId}": {
+      "schema": "DiaryRecord",
+      "description": "User video records"
+    },
+    "/users/{userId}/pdfs/{recordId}": {
+      "schema": "DiaryRecord",
+      "description": "User PDF document records"
+    },
+    "/users/{userId}/documents/{recordId}": {
+      "schema": "DiaryRecord",
+      "description": "User office and general document records"
+    },
+    "/users/{userId}/files/{recordId}": {
+      "schema": "DiaryRecord",
+      "description": "User generic file records"
+    },
     "/users/{userId}/memories/{memoryId}": {
       "schema": "MemoryItem",
       "description": "User long-term memory items"

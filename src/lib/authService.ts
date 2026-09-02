@@ -4,6 +4,7 @@ import {
   signOut as firebaseSignOut,
   signInAnonymously,
   updateProfile,
+  onAuthStateChanged,
 } from 'firebase/auth';
 import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { auth, db } from './firebase';
@@ -71,10 +72,18 @@ export function subscribeToAuth(listener: AuthStateListener): () => void {
   // Send current state
   const current = getStoredSession();
   listener(current);
+  ensureFirestoreAuthToken().catch(() => {});
   return () => {
     listeners.delete(listener);
   };
 }
+
+// Global listener to maintain active Firebase Auth state
+onAuthStateChanged(auth, (fbUser) => {
+  if (fbUser) {
+    console.log('[AUTH] Firebase Auth active:', fbUser.uid);
+  }
+});
 
 function notifyAuthState(user: UserProfile | null) {
   if (user) {
@@ -107,7 +116,7 @@ export function getStoredSession(): UserProfile | null {
  * Ensure Firebase has an active anonymous token if not logged in via Firebase Auth,
  * so Firestore queries satisfy `request.auth != null`.
  */
-async function ensureFirestoreAuthToken(): Promise<void> {
+export async function ensureFirestoreAuthToken(): Promise<void> {
   if (!auth.currentUser) {
     try {
       await signInAnonymously(auth);

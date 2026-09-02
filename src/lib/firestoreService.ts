@@ -175,20 +175,37 @@ export function mergeRecords(
   return merged;
 }
 
+const CATEGORY_COLLECTIONS = [
+  'texts',
+  'images',
+  'audios',
+  'videos',
+  'pdfs',
+  'documents',
+  'files',
+  'records',
+] as const;
+
 export async function fetchRecordsDirectly(uid: string): Promise<DiaryRecord[]> {
   try {
-    const recordsCol = collection(db, 'users', uid, 'records');
-    const snapshot = await getDocs(recordsCol);
-    const list: DiaryRecord[] = [];
-    snapshot.forEach((d) => {
-      list.push({ id: d.id, ...d.data() } as DiaryRecord);
+    const fetchPromises = CATEGORY_COLLECTIONS.map(async (colName) => {
+      try {
+        const colRef = collection(db, 'users', uid, colName);
+        const snap = await getDocs(colRef);
+        const docs: DiaryRecord[] = [];
+        snap.forEach((d) => {
+          docs.push({ id: d.id, ...d.data() } as DiaryRecord);
+        });
+        return docs;
+      } catch (colErr) {
+        console.warn(`[FIRESTORE] Fetch warning for ${colName}:`, colErr);
+        return [];
+      }
     });
-    list.sort((a, b) => {
-      const timeA = new Date(a.createdAt || a.date || a.updatedAt || 0).getTime();
-      const timeB = new Date(b.createdAt || b.date || b.updatedAt || 0).getTime();
-      return timeB - timeA;
-    });
-    return list;
+
+    const results = await Promise.all(fetchPromises);
+    const combined = results.flat();
+    return mergeRecords([], combined);
   } catch (err) {
     console.warn('[FIRESTORE] Direct fetch records warning:', err);
     return [];
@@ -200,31 +217,43 @@ export function subscribeToRecords(
   onUpdate: (records: DiaryRecord[]) => void,
   onError?: (err: Error) => void
 ) {
-  const recordsCol = collection(db, 'users', uid, 'records');
+  const collectionData = new Map<string, DiaryRecord[]>();
 
-  // Query collection directly without restrictive orderBy that could omit unindexed or in-flight docs
-  return onSnapshot(
-    recordsCol,
-    (snapshot) => {
-      const list: DiaryRecord[] = [];
-      snapshot.forEach((d) => {
-        list.push({ id: d.id, ...d.data() } as DiaryRecord);
-      });
-
-      // In-memory sort by newest first
-      list.sort((a, b) => {
-        const timeA = new Date(a.createdAt || a.date || a.updatedAt || 0).getTime();
-        const timeB = new Date(b.createdAt || b.date || b.updatedAt || 0).getTime();
-        return timeB - timeA;
-      });
-
-      onUpdate(list);
-    },
-    (error) => {
-      console.error('[FIRESTORE ERROR] Snapshot error on records:', error);
-      onError?.(error);
+  const updateCombinedList = () => {
+    const allRecords: DiaryRecord[] = [];
+    for (const list of collectionData.values()) {
+      allRecords.push(...list);
     }
-  );
+    const merged = mergeRecords([], allRecords);
+    onUpdate(merged);
+  };
+
+  const unsubs = CATEGORY_COLLECTIONS.map((colName) => {
+    const colRef = collection(db, 'users', uid, colName);
+    return onSnapshot(
+      colRef,
+      (snapshot) => {
+        const list: DiaryRecord[] = [];
+        snapshot.forEach((d) => {
+          list.push({ id: d.id, ...d.data() } as DiaryRecord);
+        });
+        collectionData.set(colName, list);
+        updateCombinedList();
+      },
+      (error) => {
+        console.error(`[FIRESTORE ERROR] Snapshot error on ${colName}:`, error);
+        onError?.(error);
+      }
+    );
+  });
+
+  return () => {
+    unsubs.forEach((unsub) => {
+      try {
+        unsub();
+      } catch {}
+    });
+  };
 }
 
 export async function saveRecord(
@@ -251,16 +280,34 @@ export async function saveRecord(
     tags: record.tags || [],
   });
 
-  const docRef = doc(db, 'users', uid, 'records', recordId);
+  // Determine category subcollection
+  let categoryName = 'texts';
+  if (fullRecord.type === 'photo') categoryName = 'images';
+  else if (fullRecord.type === 'audio') categoryName = 'audios';
+  else if (fullRecord.type === 'video') categoryName = 'videos';
+  else if (fullRecord.type === 'document') {
+    if (fullRecord.mimeType === 'application/pdf' || fullRecord.fileName?.endsWith('.pdf')) {
+      categoryName = 'pdfs';
+    } else {
+      categoryName = 'documents';
+    }
+  }
+
+  const categoryDocRef = doc(db, 'users', uid, categoryName, recordId);
+  const mainDocRef = doc(db, 'users', uid, 'records', recordId);
 
   try {
-    // Real save to Firestore
-    await setDoc(docRef, sanitizeForFirestore({
-      ...fullRecord,
-      _serverTimestamp: serverTimestamp(),
-    }));
+    await Promise.all([
+      setDoc(categoryDocRef, sanitizeForFirestore({
+        ...fullRecord,
+        _serverTimestamp: serverTimestamp(),
+      })),
+      setDoc(mainDocRef, sanitizeForFirestore({
+        ...fullRecord,
+        _serverTimestamp: serverTimestamp(),
+      })),
+    ]);
 
-    // If it was in the sync queue, mark as synced
     const pendingList = syncQueue.getPendingItems();
     const existingInQueue = pendingList.find(
       (p) => p.operationId === opId || (p.payload?.record?.id === recordId)
@@ -271,46 +318,46 @@ export async function saveRecord(
     return fullRecord;
   } catch (error: any) {
     console.error('[FIRESTORE ERROR] Firestore save failed for record:', error);
-    // Queue for sync when offline
     syncQueue.enqueue({
       operationId: opId,
       entityType: 'record',
       action: 'update',
       payload: { uid, record: fullRecord },
     });
-    // Re-throw so the UI displays ⚠ NÃO FOI POSSÍVEL SALVAR
     throw error;
   }
 }
 
 export async function softDeleteRecord(uid: string, recordId: string): Promise<void> {
-  const docRef = doc(db, 'users', uid, 'records', recordId);
   const now = new Date().toISOString();
-  await setDoc(
-    docRef,
-    sanitizeForFirestore({
-      isDeleted: true,
-      deletedAt: now,
-      updatedAt: now,
-      _serverTimestamp: serverTimestamp(),
-    }),
-    { merge: true }
+  const updatePayload = sanitizeForFirestore({
+    isDeleted: true,
+    deletedAt: now,
+    updatedAt: now,
+    _serverTimestamp: serverTimestamp(),
+  });
+
+  const updatePromises = CATEGORY_COLLECTIONS.map((colName) =>
+    setDoc(doc(db, 'users', uid, colName, recordId), updatePayload, { merge: true }).catch(() => {})
   );
+
+  await Promise.all(updatePromises);
 }
 
 export async function restoreRecord(uid: string, recordId: string): Promise<void> {
-  const docRef = doc(db, 'users', uid, 'records', recordId);
   const now = new Date().toISOString();
-  await setDoc(
-    docRef,
-    sanitizeForFirestore({
-      isDeleted: false,
-      deletedAt: null,
-      updatedAt: now,
-      _serverTimestamp: serverTimestamp(),
-    }),
-    { merge: true }
+  const updatePayload = sanitizeForFirestore({
+    isDeleted: false,
+    deletedAt: null,
+    updatedAt: now,
+    _serverTimestamp: serverTimestamp(),
+  });
+
+  const updatePromises = CATEGORY_COLLECTIONS.map((colName) =>
+    setDoc(doc(db, 'users', uid, colName, recordId), updatePayload, { merge: true }).catch(() => {})
   );
+
+  await Promise.all(updatePromises);
 }
 
 export async function permanentlyDeleteRecord(
@@ -463,11 +510,12 @@ export async function uploadFileToStorage(
   onProgress?: (percent: number, phase: string) => void
 ): Promise<{ url: string; storagePath: string }> {
   const recordId = `rec_${Date.now()}`;
+  const category = subfolder === 'audio' ? 'audios' : subfolder;
   const res = await uploadToStorageDirect({
     uid,
+    category,
     recordId,
     fileOrBlob,
-    folder: subfolder,
     fileName: filename,
     mimeType: fileOrBlob.type || undefined,
     onProgress: onProgress
