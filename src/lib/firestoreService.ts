@@ -25,6 +25,7 @@ import {
 import { db, storage } from './firebase';
 import {
   DiaryRecord,
+  RecordReflection,
   MemoryItem,
   ChatMessage,
   IAUProfileSettings,
@@ -360,6 +361,32 @@ export async function restoreRecord(uid: string, recordId: string): Promise<void
   await Promise.all(updatePromises);
 }
 
+/**
+ * Add an "Antes e Agora" reflection to an existing diary record
+ */
+export async function addRecordReflection(
+  uid: string,
+  record: DiaryRecord,
+  reflectionContent: string
+): Promise<DiaryRecord> {
+  const newReflection: RecordReflection = {
+    id: `refl_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+    date: new Date().toISOString().split('T')[0],
+    content: reflectionContent.trim(),
+    createdAt: new Date().toISOString(),
+  };
+
+  const updatedReflections = [...(record.reflections || []), newReflection];
+  const updatedRecord: DiaryRecord = {
+    ...record,
+    reflections: updatedReflections,
+    updatedAt: new Date().toISOString(),
+  };
+
+  await saveRecord(uid, updatedRecord);
+  return updatedRecord;
+}
+
 export async function permanentlyDeleteRecord(
   uid: string,
   recordId: string,
@@ -575,13 +602,14 @@ export async function flushSyncQueue(
  * 7. Full Data Export
  */
 export async function exportAllUserData(uid: string): Promise<any> {
-  const [profileSnap, settingsSnap, recordsSnap, memoriesSnap, messagesSnap] =
+  const [profileSnap, settingsSnap, recordsSnap, memoriesSnap, messagesSnap, capsulesSnap] =
     await Promise.all([
       getDoc(doc(db, 'users', uid, 'profile', 'info')),
       getDoc(doc(db, 'users', uid, 'settings', 'iauProfile')),
       getDocs(collection(db, 'users', uid, 'records')),
       getDocs(collection(db, 'users', uid, 'memories')),
       getDocs(collection(db, 'users', uid, 'messages')),
+      getDocs(collection(db, 'users', uid, 'capsules')),
     ]);
 
   const records: any[] = [];
@@ -593,16 +621,22 @@ export async function exportAllUserData(uid: string): Promise<any> {
   const messages: any[] = [];
   messagesSnap.forEach((d) => messages.push(d.data()));
 
+  const capsules: any[] = [];
+  capsulesSnap.forEach((d) => capsules.push(d.data()));
+
   return {
     exportedAt: new Date().toISOString(),
-    system: 'Diário Pessoal + IAU Central',
+    system: 'Diário 100% - Sua Vida, Do Seu Jeito',
     user: profileSnap.data() || { uid },
     settings: settingsSnap.data() || {},
     records,
     memories,
     messages,
+    capsules,
   };
 }
+
+export const exportCompleteUserData = exportAllUserData;
 
 /**
  * 8. User Account Data Deletion

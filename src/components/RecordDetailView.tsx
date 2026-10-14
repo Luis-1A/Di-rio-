@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { DiaryRecord, UserProfile, RecordAttachment } from '../types';
 import { getLocalMediaBlob } from '../lib/idbStorage';
-import { permanentlyDeleteRecord } from '../lib/firestoreService';
+import { permanentlyDeleteRecord, addRecordReflection } from '../lib/firestoreService';
 import { deleteLocalMediaBlob } from '../lib/idbStorage';
 import { verifyAccountPassword } from '../lib/authService';
 import { MediaFeedRenderer } from './MediaFeedRenderer';
@@ -33,6 +33,9 @@ import {
   Share2,
   RotateCw,
   Wand2,
+  GitCompare,
+  Send,
+  Plus,
 } from 'lucide-react';
 
 interface RecordDetailViewProps {
@@ -43,6 +46,7 @@ interface RecordDetailViewProps {
   onDeleted: (recordId: string) => void;
   onOpenPdf?: (url: string, title: string, fileName?: string, size?: number) => void;
   onEditPhoto?: (record: DiaryRecord, photoUrl: string) => void;
+  onRecordUpdated?: (record: DiaryRecord) => void;
 }
 
 export const RecordDetailView: React.FC<RecordDetailViewProps> = ({
@@ -53,6 +57,7 @@ export const RecordDetailView: React.FC<RecordDetailViewProps> = ({
   onDeleted,
   onOpenPdf,
   onEditPhoto,
+  onRecordUpdated,
 }) => {
   // Media URLs with local fallback
   const [resolvedMediaUrls, setResolvedMediaUrls] = useState<Record<string, string>>({});
@@ -75,6 +80,29 @@ export const RecordDetailView: React.FC<RecordDetailViewProps> = ({
   const [showPasswordText, setShowPasswordText] = useState(false);
   const [deleteLoading, setDeleteLoading] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  // Antes e Agora Reflection State
+  const [showReflectionForm, setShowReflectionForm] = useState(false);
+  const [reflectionInput, setReflectionInput] = useState('');
+  const [isSavingReflection, setIsSavingReflection] = useState(false);
+
+  const handleSaveNewReflection = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!reflectionInput.trim() || isSavingReflection) return;
+    setIsSavingReflection(true);
+    try {
+      const updated = await addRecordReflection(user.uid, record, reflectionInput.trim());
+      if (onRecordUpdated) {
+        onRecordUpdated(updated);
+      }
+      setReflectionInput('');
+      setShowReflectionForm(false);
+    } catch (err) {
+      console.error('Error saving reflection:', err);
+    } finally {
+      setIsSavingReflection(false);
+    }
+  };
 
   // Resolve local blobs if remote URLs are pending or not yet synced
   useEffect(() => {
@@ -515,6 +543,93 @@ export const RecordDetailView: React.FC<RecordDetailViewProps> = ({
             </div>
           </div>
         )}
+
+        {/* Antes e Agora (Evolução Pessoal) */}
+        <div className="pt-5 border-t border-stone-100 space-y-3.5">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <div className="w-7 h-7 rounded-lg bg-orange-100 text-orange-700 flex items-center justify-center">
+                <GitCompare className="w-4 h-4" />
+              </div>
+              <div>
+                <h4 className="text-xs font-bold text-stone-900 leading-none">
+                  Antes e Agora (Evolução Pessoal)
+                </h4>
+                <p className="text-[11px] text-stone-500 mt-0.5">
+                  Como você pensava naquela época vs. o que pensa hoje sobre isso
+                </p>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setShowReflectionForm(!showReflectionForm)}
+              className="inline-flex items-center gap-1 px-3 py-1 bg-orange-50 hover:bg-orange-100 text-orange-700 rounded-full text-xs font-semibold transition-colors cursor-pointer"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>Adicionar reflexão</span>
+            </button>
+          </div>
+
+          {/* Reflections list */}
+          {record.reflections && record.reflections.length > 0 && (
+            <div className="space-y-2">
+              {record.reflections.map((refl) => (
+                <div
+                  key={refl.id}
+                  className="bg-amber-50/60 border border-orange-200/80 rounded-2xl p-4 text-xs space-y-1.5"
+                >
+                  <div className="flex items-center justify-between text-[11px] text-stone-500">
+                    <span className="font-semibold text-orange-800">
+                      Reflexão adicionada em {new Date(refl.createdAt || refl.date).toLocaleDateString('pt-BR')}
+                    </span>
+                    <span className="font-mono text-stone-400">Agora</span>
+                  </div>
+                  <p className="text-stone-800 leading-relaxed font-serif text-sm italic">
+                    "{refl.content}"
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Add reflection form */}
+          {showReflectionForm && (
+            <form
+              onSubmit={handleSaveNewReflection}
+              className="bg-stone-50 border border-stone-200 rounded-2xl p-4 space-y-3 animate-in fade-in duration-150"
+            >
+              <label className="block text-xs font-semibold text-stone-800">
+                O que você pensa hoje sobre o que escreveu ou viveu neste dia?
+              </label>
+              <textarea
+                value={reflectionInput}
+                onChange={(e) => setReflectionInput(e.target.value)}
+                placeholder="Olhando para trás hoje, percebo que..."
+                rows={3}
+                autoFocus
+                className="w-full text-xs p-3 bg-white border border-stone-200 rounded-xl focus:outline-hidden focus:border-orange-500 resize-none shadow-2xs"
+              />
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowReflectionForm(false)}
+                  className="px-3 py-1.5 text-xs text-stone-600 hover:text-stone-800 cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={!reflectionInput.trim() || isSavingReflection}
+                  className="inline-flex items-center gap-1.5 px-4 py-1.5 bg-orange-600 hover:bg-orange-700 disabled:opacity-50 text-white rounded-xl text-xs font-semibold transition-all cursor-pointer shadow-xs"
+                >
+                  <Send className="w-3 h-3" />
+                  <span>{isSavingReflection ? 'Salvando...' : 'Guardar Reflexão'}</span>
+                </button>
+              </div>
+            </form>
+          )}
+        </div>
 
         {/* Additional attachments if multiple */}
         {record.attachments && record.attachments.length > 1 && (

@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   UserProfile,
   DiaryRecord,
   MemoryItem,
+  TimeCapsule,
 } from './types';
 import {
   subscribeToRecords,
@@ -12,6 +13,12 @@ import {
   fetchRecordsDirectly,
 } from './lib/firestoreService';
 import { subscribeToAuth } from './lib/authService';
+import {
+  subscribeToTimeCapsules,
+  getLocalCachedCapsules,
+} from './lib/timeCapsuleService';
+import { calculateMilestones } from './lib/milestoneEngine';
+import { generateMonthlyRetrospective } from './lib/retrospectiveEngine';
 
 import { AuthScreen } from './components/AuthScreen';
 import { Header } from './components/Header';
@@ -20,11 +27,16 @@ import { DashboardView } from './components/DashboardView';
 import { ArchiveView } from './components/ArchiveView';
 import { RecordEditor } from './components/RecordEditor';
 import { TimelineView } from './components/TimelineView';
-import { IAUProfileView } from './components/IAUProfileView';
+import { CalendarLifeView } from './components/CalendarLifeView';
+import { ProfileView } from './components/ProfileView';
+import { CinematicSplash } from './components/CinematicSplash';
 import { DiagnosticsModal } from './components/DiagnosticsModal';
 import { PDFViewerModal } from './components/PDFViewerModal';
 import { RecordDetailView } from './components/RecordDetailView';
 import { PhotoEditorModal } from './components/PhotoEditorModal';
+import { TimeCapsuleModal } from './components/TimeCapsuleModal';
+import { MonthlyRetrospectiveModal } from './components/MonthlyRetrospectiveModal';
+import { MilestonesModal } from './components/MilestonesModal';
 import { BookOpen, Loader2 } from 'lucide-react';
 
 const RECORDS_CACHE_KEY_PREFIX = 'diario_pessoal_records_cache_';
@@ -60,15 +72,28 @@ export default function App() {
   // App Data States (Real Firestore Collections with Persistent ID Merging)
   const [records, setRecords] = useState<DiaryRecord[]>([]);
   const [memories, setMemories] = useState<MemoryItem[]>([]);
+  const [capsules, setCapsules] = useState<TimeCapsule[]>([]);
 
   // Active View Tab
   const [activeTab, setActiveTab] = useState<string>('dashboard');
   const [returnTab, setReturnTab] = useState<string>('dashboard');
   const [viewingRecord, setViewingRecord] = useState<DiaryRecord | null>(null);
   const [selectedRecordForEdit, setSelectedRecordForEdit] = useState<DiaryRecord | null>(null);
+  const [newRecordType, setNewRecordType] = useState<any>('text');
+  const [newRecordPrompt, setNewRecordPrompt] = useState<string>('');
 
-  // Diagnostics Modal
+  // Modals
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const [timeCapsuleModalOpen, setTimeCapsuleModalOpen] = useState(false);
+  const [retrospectiveModalOpen, setRetrospectiveModalOpen] = useState(false);
+  const [milestonesModalOpen, setMilestonesModalOpen] = useState(false);
+  const [showCinematicSplash, setShowCinematicSplash] = useState<boolean>(() => {
+    return localStorage.getItem('diario_100_has_seen_intro') !== 'true';
+  });
+
+  // Computed Milestones & Retrospective
+  const milestones = useMemo(() => calculateMilestones(records, capsules), [records, capsules]);
+  const retrospective = useMemo(() => generateMonthlyRetrospective(records), [records]);
 
   // PDF Viewer Modal State
   const [pdfModalData, setPdfModalData] = useState<{
@@ -119,6 +144,10 @@ export default function App() {
         if (cached.length > 0) {
           setRecords(cached);
         }
+        const cachedCapsules = getLocalCachedCapsules(user.uid);
+        if (cachedCapsules.length > 0) {
+          setCapsules(cachedCapsules);
+        }
         flushSyncQueue(user.uid).catch((err) =>
           console.warn('Queue flush initial attempt:', err)
         );
@@ -126,6 +155,7 @@ export default function App() {
         setCurrentUser(null);
         setRecords([]);
         setMemories([]);
+        setCapsules([]);
       }
       setAuthLoading(false);
     });
@@ -177,9 +207,16 @@ export default function App() {
       (err) => console.warn('Memories sub err:', err)
     );
 
+    const unsubCapsules = subscribeToTimeCapsules(
+      uid,
+      (list) => setCapsules(list),
+      (err) => console.warn('Capsules sub err:', err)
+    );
+
     return () => {
       unsubRecords();
       unsubMemories();
+      unsubCapsules();
     };
   }, [currentUser?.uid]);
 
@@ -251,11 +288,26 @@ export default function App() {
     setActiveTab('edit');
   };
 
-  const handleStartNewRecord = () => {
+  const handleStartNewRecord = (type: any = 'text', prompt: string = '') => {
     setSelectedRecordForEdit(null);
     setViewingRecord(null);
+    setNewRecordType(type);
+    setNewRecordPrompt(prompt);
     setReturnTab(activeTab === 'view-record' || activeTab === 'edit' || activeTab === 'new' ? 'dashboard' : activeTab);
     setActiveTab('new');
+  };
+
+  const handleRecordUpdated = (updatedRecord: DiaryRecord) => {
+    if (currentUser?.uid && updatedRecord) {
+      setRecords((prev) => {
+        const merged = mergeRecords(prev, [updatedRecord]);
+        saveLocalCachedRecords(currentUser.uid, merged);
+        return merged;
+      });
+      if (viewingRecord?.id === updatedRecord.id) {
+        setViewingRecord(updatedRecord);
+      }
+    }
   };
 
   const handleRecordSaved = (savedRecord: DiaryRecord) => {
@@ -332,6 +384,8 @@ export default function App() {
           setViewingRecord(null);
           setActiveTab('archive');
         }}
+        onOpenTimeCapsules={() => setTimeCapsuleModalOpen(true)}
+        onOpenRetrospective={() => setRetrospectiveModalOpen(true)}
       />
 
       {/* Main Content Area */}
@@ -341,9 +395,26 @@ export default function App() {
             user={currentUser}
             records={records}
             memories={memories}
+            capsules={capsules}
             onNewRecord={handleStartNewRecord}
             onSelectRecord={handleOpenRecordForView}
             onViewAllRecords={() => setActiveTab('archive')}
+            onOpenPdf={handleOpenPdf}
+            onEditPhoto={handleOpenPhotoEditor}
+            onOpenTimeCapsules={() => setTimeCapsuleModalOpen(true)}
+            onOpenRetrospective={() => setRetrospectiveModalOpen(true)}
+            onOpenMilestones={() => setMilestonesModalOpen(true)}
+            onOpenCalendar={() => setActiveTab('calendar')}
+            onRecordUpdated={handleRecordUpdated}
+          />
+        )}
+
+        {activeTab === 'calendar' && (
+          <CalendarLifeView
+            user={currentUser}
+            records={records}
+            onSelectRecord={handleOpenRecordForView}
+            onNewRecord={handleStartNewRecord}
             onOpenPdf={handleOpenPdf}
             onEditPhoto={handleOpenPhotoEditor}
           />
@@ -356,7 +427,6 @@ export default function App() {
             onSelectRecord={handleOpenRecordForView}
             onNewRecord={handleStartNewRecord}
             onOpenPdf={handleOpenPdf}
-            onEditPhoto={handleOpenPhotoEditor}
           />
         )}
 
@@ -369,6 +439,7 @@ export default function App() {
             onDeleted={handleRecordDeleted}
             onOpenPdf={handleOpenPdf}
             onEditPhoto={handleOpenPhotoEditor}
+            onRecordUpdated={handleRecordUpdated}
           />
         )}
 
@@ -376,6 +447,8 @@ export default function App() {
           <RecordEditor
             user={currentUser}
             initialRecord={selectedRecordForEdit}
+            initialType={newRecordType}
+            initialPrompt={newRecordPrompt}
             onSaved={handleRecordSaved}
             onCancel={handleCancelEdit}
             onOpenPdf={handleOpenPdf}
@@ -393,8 +466,18 @@ export default function App() {
           />
         )}
 
-        {activeTab === 'profile' && (
-          <IAUProfileView user={currentUser} />
+        {activeTab === 'profile' && currentUser && (
+          <ProfileView
+            user={currentUser}
+            records={records}
+            capsules={capsules}
+            milestones={milestones}
+            onShowIntro={() => setShowCinematicSplash(true)}
+            onOpenDiagnostics={() => setDiagnosticsOpen(true)}
+            onSelectCollection={() => {
+              setActiveTab('archive');
+            }}
+          />
         )}
       </main>
 
@@ -435,11 +518,51 @@ export default function App() {
         />
       )}
 
+      {/* Time Capsule Modal */}
+      <TimeCapsuleModal
+        isOpen={timeCapsuleModalOpen}
+        onClose={() => setTimeCapsuleModalOpen(false)}
+        user={currentUser}
+        capsules={capsules}
+        onCapsulesChanged={() => {
+          if (currentUser?.uid) {
+            const updated = getLocalCachedCapsules(currentUser.uid);
+            setCapsules(updated);
+          }
+        }}
+      />
+
+      {/* Monthly Retrospective Modal (Wrapped Style) */}
+      <MonthlyRetrospectiveModal
+        isOpen={retrospectiveModalOpen}
+        onClose={() => setRetrospectiveModalOpen(false)}
+        retrospective={retrospective}
+        onOpenRecord={handleOpenRecordForView}
+      />
+
+      {/* Milestones & Meaningful Gamification Modal */}
+      <MilestonesModal
+        isOpen={milestonesModalOpen}
+        onClose={() => setMilestonesModalOpen(false)}
+        milestones={milestones}
+      />
+
       {/* System Diagnostics Modal */}
       <DiagnosticsModal
         isOpen={diagnosticsOpen}
         onClose={() => setDiagnosticsOpen(false)}
       />
+
+      {/* Cinematic Splash Screen */}
+      {showCinematicSplash && (
+        <CinematicSplash
+          onStart={() => {
+            localStorage.setItem('diario_100_has_seen_intro', 'true');
+            setShowCinematicSplash(false);
+          }}
+          canDismiss={localStorage.getItem('diario_100_has_seen_intro') === 'true'}
+        />
+      )}
     </div>
   );
 }

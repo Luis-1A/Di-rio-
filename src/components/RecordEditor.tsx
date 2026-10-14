@@ -34,6 +34,8 @@ import {
 interface RecordEditorProps {
   user: UserProfile;
   initialRecord?: DiaryRecord | null;
+  initialType?: FormType;
+  initialPrompt?: string;
   onSaved: (record: DiaryRecord) => void;
   onCancel: () => void;
   onOpenPdf?: (url: string, title: string, fileName?: string, size?: number) => void;
@@ -44,6 +46,8 @@ type FormType = 'text' | 'photo' | 'video' | 'audio' | 'document';
 export const RecordEditor: React.FC<RecordEditorProps> = ({
   user,
   initialRecord,
+  initialType,
+  initialPrompt,
   onSaved,
   onCancel,
   onOpenPdf,
@@ -60,10 +64,10 @@ export const RecordEditor: React.FC<RecordEditorProps> = ({
       ? initialRecord.type === 'mixed'
         ? 'document'
         : (initialRecord.type as FormType)
-      : 'text'
+      : initialType || 'text'
   );
 
-  const [title, setTitle] = useState(initialRecord?.title || '');
+  const [title, setTitle] = useState(initialRecord?.title || initialPrompt || '');
   const [content, setContent] = useState(
     initialRecord?.content || initialRecord?.description || ''
   );

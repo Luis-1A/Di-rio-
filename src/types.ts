@@ -49,6 +49,13 @@ export interface RecordAttachment {
   transcriptStatus?: 'pending' | 'processing' | 'completed' | 'failed';
 }
 
+export interface RecordReflection {
+  id: string;
+  date: string; // YYYY-MM-DD
+  content: string; // "O que eu penso hoje sobre isso..."
+  createdAt: string;
+}
+
 export interface DiaryRecord {
   id: string;
   userId: string;
@@ -61,6 +68,7 @@ export interface DiaryRecord {
   tags: string[];
   category: string;
   attachments: RecordAttachment[];
+  reflections?: RecordReflection[]; // "Antes e Agora"
   storagePath?: string;
   downloadUrl?: string;
   streamUrl?: string;
@@ -78,6 +86,63 @@ export interface DiaryRecord {
   updatedAt: string;
   operationId: string;
   syncStatus: 'synced' | 'pending' | 'uploading' | 'failed' | 'local';
+}
+
+export interface TimeCapsule {
+  id: string;
+  userId: string;
+  title: string;
+  message: string;
+  createdAt: string;
+  unlockDate: string; // YYYY-MM-DD
+  isOpened: boolean;
+  openedAt?: string;
+  futureReply?: string; // "Minha resposta do futuro"
+  attachments?: RecordAttachment[];
+  theme?: 'classic' | 'vintage' | 'stellar' | 'rose';
+}
+
+export interface Milestone {
+  id: string;
+  title: string;
+  description: string;
+  icon: string;
+  unlocked: boolean;
+  unlockedAt?: string;
+  progress?: { current: number; total: number };
+  category: 'habit' | 'depth' | 'multimedia' | 'time';
+}
+
+export interface PersonalCollection {
+  id: string;
+  name: string;
+  icon: string;
+  color?: string;
+  recordCount?: number;
+  coverUrl?: string;
+}
+
+export interface UserGamification {
+  xp: number;
+  level: number;
+  nextLevelXp: number;
+  levelTitle: string;
+}
+
+export interface MonthlyRetrospective {
+  year: number;
+  month: number; // 0-11
+  monthLabel: string; // e.g. "Outubro 2026"
+  totalRecords: number;
+  photosCount: number;
+  audiosCount: number;
+  videosCount: number;
+  docsCount: number;
+  topTags: string[];
+  topCategory: string;
+  activeDaysCount: number;
+  highlightRecords: DiaryRecord[];
+  poeticSummary: string;
 }
 
 export interface MemoryItem {

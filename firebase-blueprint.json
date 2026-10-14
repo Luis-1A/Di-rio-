@@ -59,9 +59,31 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "userId", "role", "content", "createdAt"]
+    },
+    "TimeCapsule": {
+      "title": "TimeCapsule",
+      "description": "Sealed future messages and reflections unlocked on a future date",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "title": { "type": "string" },
+        "message": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "unlockDate": { "type": "string" },
+        "isOpened": { "type": "boolean" },
+        "openedAt": { "type": "string", "format": "date-time" },
+        "futureReply": { "type": "string" },
+        "theme": { "type": "string" }
+      },
+      "required": ["id", "userId", "title", "message", "createdAt", "unlockDate", "isOpened"]
     }
   },
   "firestore": {
+    "/users/{userId}/capsules/{capsuleId}": {
+      "schema": "TimeCapsule",
+      "description": "User time capsules sealed for future reopening"
+    },
     "/users/{userId}": {
       "schema": "UserProfile",
       "description": "Primary user profile document"

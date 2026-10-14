@@ -11,12 +11,15 @@ import {
   Search,
   Sliders,
   CheckCircle2,
+  User,
 } from 'lucide-react';
 
 interface HeaderProps {
   user: UserProfile;
   onOpenDiagnostics: () => void;
   onOpenSearch?: () => void;
+  onOpenTimeCapsules?: () => void;
+  onOpenRetrospective?: () => void;
   activeTab: string;
   setActiveTab: (tab: string) => void;
 }
@@ -25,6 +28,8 @@ export const Header: React.FC<HeaderProps> = ({
   user,
   onOpenDiagnostics,
   onOpenSearch,
+  onOpenTimeCapsules,
+  onOpenRetrospective,
   activeTab,
   setActiveTab,
 }) => {
@@ -137,8 +142,11 @@ export const Header: React.FC<HeaderProps> = ({
               <BookOpen className="w-4 h-4" />
             </div>
             <div>
-              <div className="text-base font-bold text-stone-800 leading-none">
-                Diário Pessoal
+              <div className="text-sm font-bold text-stone-900 leading-tight">
+                Diário 100%
+              </div>
+              <div className="text-[10px] text-stone-500 font-serif italic hidden sm:block">
+                Sua vida, do seu jeito
               </div>
             </div>
           </button>
@@ -165,6 +173,16 @@ export const Header: React.FC<HeaderProps> = ({
             }`}
           >
             Arquivo
+          </button>
+          <button
+            onClick={() => setActiveTab('calendar')}
+            className={`px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
+              activeTab === 'calendar'
+                ? 'bg-white text-stone-900 font-semibold shadow-xs'
+                : 'text-stone-600 hover:text-stone-900'
+            }`}
+          >
+            Calendário
           </button>
           <button
             onClick={() => setActiveTab('new')}
@@ -213,9 +231,29 @@ export const Header: React.FC<HeaderProps> = ({
           )}
 
           <button
+            onClick={() => setActiveTab(activeTab === 'profile' ? 'dashboard' : 'profile')}
+            title="Meu Perfil & Coleções"
+            className={`p-1.5 rounded-xl border transition-all cursor-pointer flex items-center justify-center ${
+              activeTab === 'profile'
+                ? 'border-orange-500 bg-orange-50 text-orange-700'
+                : 'border-stone-200/80 bg-white hover:bg-stone-50 text-stone-700 shadow-2xs'
+            }`}
+          >
+            {user?.photoURL ? (
+              <img
+                src={user.photoURL}
+                alt={user.displayName || 'Perfil'}
+                className="w-5 h-5 rounded-lg object-cover"
+              />
+            ) : (
+              <User className="w-4 h-4 text-stone-700" />
+            )}
+          </button>
+
+          <button
             onClick={onOpenDiagnostics}
             title="Diagnóstico & Status"
-            className="p-2 rounded-xl text-stone-500 hover:text-orange-600 hover:bg-orange-50 transition-colors cursor-pointer"
+            className="p-2 rounded-xl text-stone-500 hover:text-orange-600 hover:bg-orange-50 transition-colors cursor-pointer hidden sm:block"
           >
             <Sliders className="w-4 h-4" />
           </button>
@@ -223,7 +261,7 @@ export const Header: React.FC<HeaderProps> = ({
           <button
             onClick={() => logoutUser()}
             title="Sair da conta"
-            className="p-2 rounded-xl text-stone-400 hover:text-red-600 hover:bg-red-50 transition-colors cursor-pointer"
+            className="p-2 rounded-xl text-stone-400 hover:text-red-600 hover:bg-red-50 transition-colors cursor-pointer hidden sm:block"
           >
             <LogOut className="w-4 h-4" />
           </button>
